@@ -1,0 +1,5 @@
+### DMX AUDIO REACT START
+dtparam=audio=off
+dtoverlay=hifiberry-dacplusadc
+dtparam=spi=on
+### DMX AUDIO REACT END

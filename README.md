@@ -1,13 +1,13 @@
-# nn DMX Audio-Reactive Light Controller (Pi + HiFiBerry + OLA)
+# DMX Audio-Reactive Light Controller (Pi + HiFiBerry + OLA)
 This project turns a Raspberry Pi with a **HiFiBerry DAC+ADC** into a real-time audio-reactive DMX controller. ---
-## n Features
+## Features
 - 6 knobs: Center Frequency, Q, Threshold, Attack, Decay, Brightness
 - 4 programs (via rotary switch): All, Chase, Random, Ambient
 - Reset button restores defaults instantly
 - Blue LED indicates system ready
 - Auto-start on boot (systemd) or manual TUI mode
 ---
-## n Hardware
+## Hardware
 - Raspberry Pi 4/5
 - HiFiBerry DAC+ADC HAT
 - MCP3008 ADC
@@ -17,7 +17,7 @@ This project turns a Raspberry Pi with a **HiFiBerry DAC+ADC** into a real-time 
 - Blue LED + 330W resistor
 - DMX interface (Enttec or compatible)
 ---
-## n Wiring (BCM numbering)
+## Wiring (BCM numbering)
 ### MCP3008 (SPI0 CE0)
 ```
 VDD, VREF ® 3.3V
@@ -47,7 +47,7 @@ BCM25 ® button ® GND (internal pull-up)
 BCM5 ® 330W resistor ® LED anode, LED cathode ® GND
 ```
 ---
-## n Defaults (on startup)
+## Defaults (on startup)
 ```
 Center: 120 Hz
 Q: 1.7
@@ -57,7 +57,7 @@ Decay: 50 ms
 Brightness: 1.0
 ```
 ---
-## nn Fresh Install
+## Fresh Install
 ```
 sudo apt update && sudo apt install -y git
 git clone https://github.com/<YOUR_USERNAME>/pi-dmx-controller.git ~/dmx_project
@@ -67,7 +67,7 @@ chmod +x setup.sh
 sudo reboot
 ```
 ---
-## n Python Environment
+## Python Environment
 ```
 cd ~/dmx_project
 python3 -m venv venv
@@ -88,7 +88,7 @@ sounddevice==0.5.3
 spidev==3.8
 ```
 ---
-## n Service Control (Headless Mode)
+## Service Control (Headless Mode)
 ```
 sudo systemctl status dmx_audio_react
 sudo systemctl stop dmx_audio_react
@@ -98,7 +98,7 @@ sudo systemctl enable dmx_audio_react
 sudo journalctl -u dmx_audio_react -f
 ```
 ---
-## nn TUI Mode (Interactive Debugging)
+## TUI Mode (Interactive Debugging)
 The Text User Interface (TUI) lets you visualize parameters, see real-time envelope and frequency response, ### n Temporarily Run in TUI Mode
 1. **Stop the auto-start service** (so it doesn’t conflict):
 ```bash
@@ -156,12 +156,12 @@ n *Tip:* Check recent logs anytime with:
 sudo journalctl -u dmx_audio_react -n 30 --no-pager
 ```
 ---
-## n Backup to Your Mac
+## Backup to Your Mac
 ```
 rsync -avz pi@raspberrypi.local:/home/pi/dmx_project ~/Desktop/Pi_DMX_Backup
 ```
 ---
-## n Troubleshooting
+## Troubleshooting
 | Symptom | Likely Cause | Fix |
 |----------|--------------|-----|
 | Blue LED off | OLA not running | `sudo systemctl restart olad` |
@@ -169,7 +169,7 @@ rsync -avz pi@raspberrypi.local:/home/pi/dmx_project ~/Desktop/Pi_DMX_Backup
 | No audio input | PipeWire conflict | Stop PipeWire with `systemctl --user stop pipewire*` |
 | Knobs unresponsive | SPI disabled | Add `dtparam=spi=on` in `/boot/firmware/config.txt` |
 ---
-## n Quick Test Scripts
+## Quick Test Scripts
 ### Read Rotary Switch
 ```bash
 python3 - <<'PY'
@@ -206,7 +206,7 @@ GPIO.cleanup()
 PY
 ```
 ---
-## nn Systemd Service (reference)
+## Systemd Service (reference)
 `/etc/systemd/system/dmx_audio_react.service`
 ```
 [Unit]
@@ -225,12 +225,12 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 ---
-## n Audio Testing
+## Audio Testing
 ```
 arecord -l
 aplay -l
 alsamixer
 ```
 ---
-## n License
+## License
 MIT © 2025 Ben Glasser

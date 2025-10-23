@@ -18,6 +18,10 @@ This project turns a Raspberry Pi with a **HiFiBerry DAC+ADC** into a real-time 
 - DMX interface (Enttec or compatible)
 ---
 ## Wiring (BCM numbering)
+
+Below is a high-level overview of the wiring setup.  
+For a complete pinout, connection diagrams, and detailed instructions, see the full [Wiring Guide](docs/wiring.md).
+
 ### MCP3008 (SPI0 CE0)
 ```
 VDD, VREF ® 3.3V

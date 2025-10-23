@@ -155,7 +155,7 @@ sudo systemctl start dmx_audio_react
 sudo systemctl enable dmx_audio_react # auto-run on boot
 sudo systemctl disable dmx_audio_react # disable auto-run
 ```
-n *Tip:* Check recent logs anytime with:
+Tip: Check recent logs anytime with:
 ```bash
 sudo journalctl -u dmx_audio_react -n 30 --no-pager
 ```

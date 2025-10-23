@@ -118,7 +118,7 @@ python3 dmx_audio_react.py
 - Press **`q`** to quit.
 - Press the **Reset button (GPIO25)** to restore defaults.
 - Adjust knobs and switch programs interactively.
-### n Return to Automatic (Headless) Mode
+### Return to Automatic (Headless) Mode
 Once finished, restart the background service:
 ```bash
 sudo systemctl start dmx_audio_react
@@ -129,7 +129,7 @@ sudo systemctl status dmx_audio_react
 ```
 The **blue LED** will light when the service (and OLA) are active.
 ---
-## nn Editing the Script Manually
+## Editing the Script Manually
 You can safely make manual edits to your main script (`dmx_audio_react.py`) without breaking the service.
 ### Step-by-step:
 1. **Stop the service:**

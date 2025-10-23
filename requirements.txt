@@ -1,9 +1,19 @@
-cffi==2.0.0
-colorzero==2.0
-gpiozero==2.0.1
+# Core DSP / math
 numpy==2.3.4
+
+# Audio
+sounddevice==0.5.3
+
+# GPIO + SPI
+RPi.GPIO==0.7.1
+spidev==3.8
+gpiozero==2.0.1
+colorzero==2.0
+
+# DMX / OLA
 protobuf==3.20.3
+
+# Utility deps
+cffi==2.0.0
 pycparser==2.23
 pyserial==3.5
-sounddevice==0.5.3
-spidev==3.8

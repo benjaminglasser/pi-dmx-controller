@@ -4,7 +4,7 @@ This guide covers all wiring for the **Raspberry Pi + HiFiBerry DAC+ADC + MCP300
 
 ---
 
-## 🧠 Overview
+## Overview
 
 | Component | Purpose | GPIO / Interface |
 |------------|----------|------------------|
@@ -16,7 +16,7 @@ This guide covers all wiring for the **Raspberry Pi + HiFiBerry DAC+ADC + MCP300
 
 ---
 
-## 🔌 MCP3008 Connections (SPI0 CE0)
+## MCP3008 Connections (SPI0 CE0)
 
 | MCP3008 Pin | Connects To | Notes |
 |--------------|-------------|-------|
@@ -45,7 +45,7 @@ Each potentiometer (10 kΩ) →
 
 ---
 
-## 🔄 Rotary Program Switch (4-Way)
+## Rotary Program Switch (4-Way)
 
 Connect four switch outputs to these GPIOs (internal pull-ups enabled):
 
@@ -61,7 +61,7 @@ Each position connects a unique combo of these GPIOs to ground, as shown above.
 
 ---
 
-## 🔘 Reset Button (BCM 25)
+## Reset Button (BCM 25)
 
 | Pin | Connection |
 |------|-------------|
@@ -91,7 +91,7 @@ OLA detects it automatically as **Universe 1**.
 
 ---
 
-## 🧾 Pin Reference (BCM Layout Summary)
+## Pin Reference (BCM Layout Summary)
 
 | Pin | Function |
 |------|-----------|
@@ -102,7 +102,7 @@ OLA detects it automatically as **Universe 1**.
 
 ---
 
-## 🧩 Tips
+## Tips
 - Keep all grounds common between Pi, MCP3008, and DMX hardware.  
 - Use short shielded wires for analog signals (CH0–CH5) to reduce noise.  
 - If the pots behave inversely, swap the outer legs (3.3 V ↔ GND).  

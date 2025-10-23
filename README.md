@@ -20,7 +20,7 @@ This project turns a Raspberry Pi with a **HiFiBerry DAC+ADC** into a real-time 
 ## Wiring (BCM numbering)
 
 Below is a high-level overview of the wiring setup.  
-For a complete pinout, connection diagrams, and detailed instructions, see the full [Wiring Guide](docs/wiring.md).
+For a complete pinout, connection diagrams, and detailed instructions, see the full [Wiring Guide](docs/WIRING.md).
 
 ### MCP3008 (SPI0 CE0)
 ```

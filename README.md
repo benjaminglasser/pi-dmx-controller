@@ -159,6 +159,9 @@ The blue LED will light when OLA and the service are active.
 ---
 ## Systemd Service (Headless Mode)
 `/etc/systemd/system/pi-dmx.service`
+This section explains how the project runs automatically in the background as a systemd service.
+Systemd ensures your controller script starts on boot, restarts if it fails, and can be controlled manually with systemctl commands.
+The service file (/etc/systemd/system/pi-dmx.service) defines how and when the Pi launches your dmx_audio_react.py script and ensures OLA and audio systems are ready first.
 ```ini
 [Unit]
 Description=Pi DMX Controller

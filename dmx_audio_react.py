@@ -20,7 +20,7 @@ from ola.ClientWrapper import ClientWrapper
 
 # ===================== Config =====================
 
-UNIVERSE   = 1
+UNIVERSE   = 0
 DMX_CHANS  = 4
 
 # Startup defaults (your preferred values)

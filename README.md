@@ -1,41 +1,41 @@
 # DMX Audio-Reactive Light Controller (Pi + HiFiBerry + OLA)
-This project turns a Raspberry Pi with a **HiFiBerry DAC+ADC** into a real-time audio-reactive DMX controller. ---
+This project turns a Raspberry Pi with a HiFiBerry DAC+ADC and DMXKing UltraDMX Pro into a real-time, ---
 ## Features
-- 6 knobs: Center Frequency, Q, Threshold, Attack, Decay, Brightness
-- 4 programs (via rotary switch): All, Chase, Random, Ambient
+- Six analog knobs: Center Frequency, Q, Threshold, Attack, Decay, Brightness
+- Four programs via rotary switch: All, Chase, Random, Ambient
 - Reset button restores defaults instantly
 - Blue LED indicates system ready
-- Auto-start on boot (systemd) or manual TUI mode
+- Optional auto-start on boot (systemd) or interactive TUI mode
+- Tested on Raspberry Pi OS Bookworm (32-bit) + OLA 0.10.9 + Python 3.11
 ---
 ## Hardware
-- Raspberry Pi 4/5
-- HiFiBerry DAC+ADC HAT
-- MCP3008 ADC
-- 6× 10kW potentiometers
-- 4-way rotary switch
-- Push button (momentary)
-- Blue LED + 330W resistor
-- DMX interface (Enttec or compatible)
+| Component | Purpose |
+|------------|----------|
+| Raspberry Pi 4 B / 5 | Host computer |
+| HiFiBerry DAC+ADC HAT | Stereo input + output for audio reactivity |
+| MCP3008 ADC | Reads potentiometers (SPI0 CE0) |
+| 6× 10 kW Potentiometers | Parameter control |
+| 4-way Rotary Switch | Program select |
+| Push Button (momentary) | Reset to defaults |
+| Blue LED + 330 W resistor | System active indicator |
+| DMXKing UltraDMX Pro | USB ® DMX interface |
+| Chauvet DJ DMX-4 or similar | Fixture output device |
 ---
 ## Wiring (BCM numbering)
-
-Below is a high-level overview of the wiring setup.  
-For a complete pinout, connection diagrams, and detailed instructions, see the full [Wiring Guide](docs/WIRING.md).
-
 ### MCP3008 (SPI0 CE0)
 ```
-VDD, VREF ® 3.3V
+VDD, VREF ® 3.3 V
 AGND, DGND ® GND
 CLK ® BCM11
 MOSI ® BCM10
 MISO ® BCM9
 CE0 ® BCM8
-CH0–CH5 ® Potentiometers (Freq, Q, Thresh, Attack, Decay, Bright)
+CH0–CH5 ® Pots (Freq, Q, Thresh, Attack, Decay, Bright)
 CH6–CH7 ® Unused
 ```
 ### Rotary Switch
 ```
-BCM21, BCM22, BCM23, BCM24 (internal pull-ups)
+BCM21, BCM22, BCM23, BCM24 (with internal pull-ups)
 Truth Table:
 (1,1,1,1) ® Program 1: All
 (1,1,1,0) ® Program 2: Chase
@@ -44,14 +44,15 @@ Truth Table:
 ```
 ### Reset Button
 ```
-BCM25 ® button ® GND (internal pull-up)
+BCM25 ® Button ® GND (internal pull-up)
 ```
 ### Blue LED
 ```
-BCM5 ® 330W resistor ® LED anode, LED cathode ® GND
+BCM5 ® 330 W Resistor ® LED Anode
+LED Cathode ® GND
 ```
 ---
-## Defaults (on startup)
+## Default Startup Values
 ```
 Center: 120 Hz
 Q: 1.7
@@ -61,158 +62,103 @@ Decay: 50 ms
 Brightness: 1.0
 ```
 ---
-## Fresh Install
-```
-sudo apt update && sudo apt install -y git
-git clone https://github.com/<YOUR_USERNAME>/pi-dmx-controller.git ~/dmx_project
-cd ~/dmx_project
-chmod +x setup.sh
-./setup.sh
+## Fresh Install (from clean Pi)
+1. Flash **Raspberry Pi OS Bookworm (32-bit)** using Raspberry Pi Imager and enable SSH.
+2. Boot and update:
+```bash
+sudo apt update && sudo apt full-upgrade -y
 sudo reboot
 ```
----
-## Python Environment
+3. Clone and bootstrap:
+```bash
+git clone https://github.com/benjaminglasser/pi-dmx-controller.git
+cd ~/pi-dmx-controller
+bash scripts/bootstrap_pi.sh
+sudo reboot
 ```
-cd ~/dmx_project
-python3 -m venv venv
-source venv/bin/activate
+This script:
+- Installs OLA, PortAudio, and Python environment dependencies
+- Enables SPI/I²C
+- Adds HiFiBerry overlay (`dtoverlay=hifiberry-dacplusadc`) in `/boot/firmware/config.txt`
+- Builds a Python virtual environment using `--system-site-packages`
+- Patches Universe 0 ® DMXKing port 0 in OLA
+---
+## Python Environment (Manual Setup)
+```bash
+cd ~/pi-dmx-controller
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
-`requirements.txt`
-```
-cffi==2.0.0
-colorzero==2.0
+### requirements.txt
+```text
+# Core DSP / math
+numpy==1.26.4 # stable on Pi (avoids libopenblas issues)
+# Audio
+sounddevice==0.5.3
+# GPIO + SPI
+RPi.GPIO==0.7.1
+spidev==3.8
 gpiozero==2.0.1
-numpy==2.3.4
+colorzero==2.0
+# DMX / OLA
 protobuf==3.20.3
+# Utility
+cffi==2.0.0
 pycparser==2.23
 pyserial==3.5
-sounddevice==0.5.3
-spidev==3.8
 ```
 ---
-## Service Control (Headless Mode)
+## Verify OLA & Universe
+```bash
+sudo systemctl start olad
+sleep 2
+ola_dev_info | grep DMXking
+bash scripts/verify_universe.sh
 ```
-sudo systemctl status dmx_audio_react
-sudo systemctl stop dmx_audio_react
-sudo systemctl start dmx_audio_react
-sudo systemctl disable dmx_audio_react
-sudo systemctl enable dmx_audio_react
-sudo journalctl -u dmx_audio_react -f
+Expected output:
+```
+Device 10: DMXking.com – UltraDMX2 PRO
+port 0, OUT, patched to universe 0
+```
+---
+## Quick DMX Test
+Set your Chauvet DMX-4 address to 1, then:
+```bash
+ola_streaming_client --universe 0 --dmx 255,0,0,0,0,0,0,0
+```
+Channel 1 should light.
+Turn off:
+```bash
+ola_streaming_client --universe 0 --dmx 0,0,0,0,0,0,0,0
 ```
 ---
 ## TUI Mode (Interactive Debugging)
-The Text User Interface (TUI) lets you visualize parameters, see real-time envelope and frequency response, ### n Temporarily Run in TUI Mode
-1. **Stop the auto-start service** (so it doesn’t conflict):
+### Temporarily Run in TUI Mode
+1. Stop auto-start service:
 ```bash
 sudo systemctl stop dmx_audio_react
 ```
-2. **Activate your environment and launch manually:**
+2. Run manually:
 ```bash
-cd ~/dmx_project
-source venv/bin/activate
-python3 dmx_audio_react.py
+cd ~/pi-dmx-controller
+source .venv/bin/activate
+python dmx_audio_react.py
 ```
-3. The TUI will appear in your terminal window.
-- Press **`q`** to quit.
-- Press the **Reset button (GPIO25)** to restore defaults.
-- Adjust knobs and switch programs interactively.
-### Return to Automatic (Headless) Mode
-Once finished, restart the background service:
+3. Press `q` to quit.
+Press the reset button (GPIO 25) to restore defaults.
+Adjust knobs and programs in real time.
+### Return to Headless Mode
 ```bash
 sudo systemctl start dmx_audio_react
-```
-To confirm it’s running:
-```bash
 sudo systemctl status dmx_audio_react
 ```
-The **blue LED** will light when the service (and OLA) are active.
+The blue LED will light when OLA and the service are active.
 ---
-## Editing the Script Manually
-You can safely make manual edits to your main script (`dmx_audio_react.py`) without breaking the service.
-### Step-by-step:
-1. **Stop the service:**
-```bash
-sudo systemctl stop dmx_audio_react
-```
-2. **Open and edit the script:**
-```bash
-cd ~/dmx_project
-nano dmx_audio_react.py
-```
-3. **(Optional)** Test interactively with TUI before re-enabling autostart:
-```bash
-source venv/bin/activate
-python3 dmx_audio_react.py
-```
-4. **Once verified**, restart the service for headless operation:
-```bash
-sudo systemctl start dmx_audio_react
-```
-5. **Enable or disable autostart at boot:**
-```bash
-sudo systemctl enable dmx_audio_react # auto-run on boot
-sudo systemctl disable dmx_audio_react # disable auto-run
-```
-Tip: Check recent logs anytime with:
-```bash
-sudo journalctl -u dmx_audio_react -n 30 --no-pager
-```
----
-## Backup to Your Mac
-```
-rsync -avz pi@raspberrypi.local:/home/pi/dmx_project ~/Desktop/Pi_DMX_Backup
-```
----
-## Troubleshooting
-| Symptom | Likely Cause | Fix |
-|----------|--------------|-----|
-| Blue LED off | OLA not running | `sudo systemctl restart olad` |
-| TUI error | Run manually (not via systemd) | `sudo systemctl stop dmx_audio_react` |
-| No audio input | PipeWire conflict | Stop PipeWire with `systemctl --user stop pipewire*` |
-| Knobs unresponsive | SPI disabled | Add `dtparam=spi=on` in `/boot/firmware/config.txt` |
----
-## Quick Test Scripts
-### Read Rotary Switch
-```bash
-python3 - <<'PY'
-import time, RPi.GPIO as GPIO
-PINS=[21,22,23,24]
-MAP={(1,1,1,1):1,(1,1,1,0):2,(1,0,1,0):3,(0,1,1,0):4}
-GPIO.setmode(GPIO.BCM)
-for p in PINS: GPIO.setup(p, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-last=None
-try:
-while True:
-s=tuple(GPIO.input(p) for p in PINS)
-if s!=last:
-last=s
-print("state=",s,"® Program",MAP.get(s,"?"))
-time.sleep(0.05)
-finally:
-GPIO.cleanup()
-PY
-```
-### Check Reset Button
-```bash
-python3 - <<'PY'
-import time, RPi.GPIO as GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(25, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-print("Press button to test (Ctrl+C to exit)")
-try:
-while True:
-print("LOW=pressed" if GPIO.input(25)==0 else "HIGH=idle")
-time.sleep(0.2)
-finally:
-GPIO.cleanup()
-PY
-```
----
-## Systemd Service (reference)
+## Systemd Service (Headless Mode)
 `/etc/systemd/system/dmx_audio_react.service`
-```
+```ini
 [Unit]
 Description=DMX Audio Reactive Light Controller
 After=network-online.target sound.target olad.service
@@ -220,20 +166,51 @@ Wants=network-online.target olad.service
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/dmx_project
+WorkingDirectory=/home/pi/pi-dmx-controller
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/dmx_project/venv/bin/python3 /home/pi/dmx_project/dmx_audio_react.py
+ExecStart=/home/pi/pi-dmx-controller/.venv/bin/python3 /home/pi/pi-dmx-controller/dmx_audio_react.py
 Restart=on-failure
 RestartSec=2
 [Install]
 WantedBy=multi-user.target
 ```
+Service control:
+```bash
+sudo systemctl start dmx_audio_react
+sudo systemctl stop dmx_audio_react
+sudo systemctl enable dmx_audio_react
+sudo systemctl disable dmx_audio_react
+sudo journalctl -u dmx_audio_react -f
+```
+---
+## Troubleshooting
+| Symptom | Likely Cause | Fix |
+|----------|--------------|-----|
+| Blue LED off | OLA not running | `sudo systemctl restart olad` |
+| TUI error | Service still active | `sudo systemctl stop dmx_audio_react` |
+| No audio input | PipeWire conflict | `systemctl --user stop pipewire*` |
+| Knobs unresponsive | SPI disabled | Add `dtparam=spi=on` to `/boot/firmware/config.txt` |
+| TX LED not blinking on DMXKing | USB or power fault | Check cable and `ola_dev_info` |
+| No module named 'ola' | Python cannot see OLA bindings | `sudo apt install ola ola-python` then rebuild | libopenblas.so.0 not found | Wrong NumPy build | Downgrade to `numpy==1.26.4` |
 ---
 ## Audio Testing
-```
+```bash
 arecord -l
 aplay -l
 alsamixer
+```
+Expected card: `snd_rpi_hifiberry_dacplusadc`
+---
+## Backup to Mac
+```bash
+rsync -avz pi@raspberrypi.local:/home/pi/pi-dmx-controller ~/Desktop/Pi_DMX_Backup
+```
+---
+## Golden Image Backup
+Create a restorable SD image once stable:
+```bash
+sudo dd if=/dev/mmcblk0 of=/media/pi/USB/pi-dmx-working.img bs=4M status=progress
+sync
 ```
 ---
 ## License

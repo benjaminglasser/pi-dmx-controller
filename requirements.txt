@@ -1,5 +1,6 @@
 # Core DSP / math
-numpy==2.3.4
+# Note: 1.26.4 is the most stable version on Raspberry Pi OS (avoids libopenblas issues)
+numpy==1.26.4
 
 # Audio
 sounddevice==0.5.3

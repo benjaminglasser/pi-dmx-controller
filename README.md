@@ -67,6 +67,7 @@ Brightness: 1.0
 2. Boot and update:
 ```bash
 sudo apt update && sudo apt full-upgrade -y
+sudo apt install python3 python3-pip python3-venv ola git
 sudo reboot
 ```
 3. Clone and bootstrap:
@@ -200,19 +201,6 @@ sudo journalctl -u dmx_audio_react -f
 arecord -l
 aplay -l
 alsamixer
-```
-Expected card: `snd_rpi_hifiberry_dacplusadc`
----
-## Backup to Mac
-```bash
-rsync -avz pi@raspberrypi.local:/home/pi/pi-dmx-controller ~/Desktop/Pi_DMX_Backup
-```
----
-## Golden Image Backup
-Create a restorable SD image once stable:
-```bash
-sudo dd if=/dev/mmcblk0 of=/media/pi/USB/pi-dmx-working.img bs=4M status=progress
-sync
 ```
 ---
 ## License

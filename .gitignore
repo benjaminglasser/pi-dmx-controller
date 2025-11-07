@@ -9,3 +9,8 @@ venv/
 # System files
 .DS_Store
 *.log
+.venv/
+__pycache__/
+*.pyc
+*.wav
+

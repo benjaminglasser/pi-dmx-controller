@@ -138,7 +138,7 @@ ola_streaming_client --universe 0 --dmx 0,0,0,0,0,0,0,0
 ### Temporarily Run in TUI Mode
 1. Stop auto-start service:
 ```bash
-sudo systemctl stop dmx_audio_react
+sudo systemctl stop pi-dmx
 ```
 2. Run manually:
 ```bash
@@ -151,18 +151,19 @@ Press the reset button (GPIO 25) to restore defaults.
 Adjust knobs and programs in real time.
 ### Return to Headless Mode
 ```bash
-sudo systemctl start dmx_audio_react
-sudo systemctl status dmx_audio_react
+sudo systemctl start pi-dmx
+sudo systemctl status pi-dmx
 ```
 The blue LED will light when OLA and the service are active.
 ---
 ## Systemd Service (Headless Mode)
-`/etc/systemd/system/dmx_audio_react.service`
+`/etc/systemd/system/pi-dmx.service`
 ```ini
 [Unit]
-Description=DMX Audio Reactive Light Controller
+Description=Pi DMX Controller
 After=network-online.target sound.target olad.service
 Wants=network-online.target olad.service
+
 [Service]
 Type=simple
 User=pi
@@ -171,6 +172,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/pi/pi-dmx-controller/.venv/bin/python3 /home/pi/pi-dmx-controller/dmx_audio_react.py
 Restart=on-failure
 RestartSec=2
+
 [Install]
 WantedBy=multi-user.target
 ```
@@ -187,7 +189,7 @@ sudo journalctl -u dmx_audio_react -f
 | Symptom | Likely Cause | Fix |
 |----------|--------------|-----|
 | Blue LED off | OLA not running | `sudo systemctl restart olad` |
-| TUI error | Service still active | `sudo systemctl stop dmx_audio_react` |
+| TUI error | Service still active | `sudo systemctl stop pi-dmx` |
 | No audio input | PipeWire conflict | `systemctl --user stop pipewire*` |
 | Knobs unresponsive | SPI disabled | Add `dtparam=spi=on` to `/boot/firmware/config.txt` |
 | TX LED not blinking on DMXKing | USB or power fault | Check cable and `ola_dev_info` |

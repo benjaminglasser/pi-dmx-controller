@@ -96,15 +96,19 @@ pip install -r requirements.txt
 ```text
 # Core DSP / math
 numpy==1.26.4 # stable on Pi (avoids libopenblas issues)
+
 # Audio
 sounddevice==0.5.3
+
 # GPIO + SPI
 RPi.GPIO==0.7.1
 spidev==3.8
 gpiozero==2.0.1
 colorzero==2.0
+
 # DMX / OLA
 protobuf==3.20.3
+
 # Utility
 cffi==2.0.0
 pycparser==2.23
@@ -155,10 +159,10 @@ Adjust knobs and programs in real time.
 sudo systemctl start pi-dmx
 sudo systemctl status pi-dmx
 ```
-The blue LED will light when OLA and the service are active.
+```The blue LED will light when OLA and the service are active.```
+
 ---
 ## Systemd Service (Headless Mode)
-`/etc/systemd/system/pi-dmx.service`
 This section explains how the project runs automatically in the background as a systemd service.
 Systemd ensures your controller script starts on boot, restarts if it fails, and can be controlled manually with systemctl commands.
 The service file (/etc/systemd/system/pi-dmx.service) defines how and when the Pi launches your dmx_audio_react.py script and ensures OLA and audio systems are ready first.

@@ -206,11 +206,25 @@ _ambient_next_time = 0.0
 def ambient_vals(dt_ms):
     global _ambient_next_time
     now = time.time()
+
+    # --- Dynamic speed control only in ambient preset ---
+    if PROGRAM == 4:
+        # Normalize center frequency knob (20–11 000 Hz)
+        norm = (math.log10(band.center) - math.log10(20)) / (math.log10(11000) - math.log10(20))
+        # Wider range: slower lows, gentler highs
+        speed_factor = lerp(0.2, 2.0, 1 - norm)  # flipped: right = faster, left = slower
+    else:
+        speed_factor = 1.0
+
+    # Random trigger interval scaled by speed factor
+    base_min, base_max = 0.4 * speed_factor, 1.2 * speed_factor
+
     if now >= _ambient_next_time:
-        _ambient_next_time = now + random.uniform(0.4, 1.2)
-        k = random.choices([1,2,3], weights=[0.65,0.30,0.05])[0]
+        _ambient_next_time = now + random.uniform(base_min, base_max)
+        k = random.choices([1, 2, 3], weights=[0.65, 0.30, 0.05])[0]
         idxs = random.sample(range(DMX_CHANS), k)
         trigger_idxs(idxs, band.attack_ms, band.decay_ms)
+
     return update_lights(dt_ms)
 
 # ===================== DSP =====================

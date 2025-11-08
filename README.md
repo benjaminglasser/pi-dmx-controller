@@ -38,7 +38,7 @@ CH6–CH7 ® Unused
 BCM21, BCM22, BCM23, BCM24 (with internal pull-ups)
 Truth Table:
 (1,1,1,1) ® Program 1: All
-(1,1,1,0) ® Program 2: Chase
+(1,1,0,0) ® Program 2: Chase
 (1,0,1,0) ® Program 3: Random
 (0,1,1,0) ® Program 4: Ambient
 ```

@@ -86,6 +86,14 @@ def ui_flash(msg: str, seconds: float = 1.5):
     _ui_flash_msg   = msg
     _ui_flash_until = time.time() + seconds
 
+def _set_stop(val: bool):
+    global STOP_THREADS
+    STOP_THREADS = val
+
+def _set_run(val: bool):
+    global RUNNING
+    RUNNING = val    
+
 # ===================== OLA / DMX =====================
 
 wrapper = ClientWrapper()
@@ -93,6 +101,30 @@ client  = wrapper.Client()
 
 dmx_frame      = array('B', [0]*DMX_CHANS)
 _last_dmx_send = 0.0
+
+def _dmx_pump():
+    """Runs in the OLA wrapper thread: rate-limit & flush DMX if dirty, reschedule itself."""
+    global _dmx_dirty, _last_dmx_send
+    now = time.time()
+
+    # graceful exit: if we're stopping, end the wrapper loop
+    if STOP_THREADS:
+        try:
+            wrapper.Stop()
+        except Exception:
+            pass
+        return  # don't reschedule
+
+    if _dmx_dirty and (now - _last_dmx_send) >= _DMX_MIN_INTERVAL:
+        # copy pending into the frame and send from THIS (owner) thread
+        for i in range(DMX_CHANS):
+            dmx_frame[i] = _pending_vals[i]
+        client.SendDmx(UNIVERSE, _CompatBuf(dmx_frame), lambda s: None)
+        _last_dmx_send = now
+        _dmx_dirty = False
+
+    # reschedule ~every 10–20ms
+    wrapper.AddEvent(20, _dmx_pump)  # milliseconds
 
 class _CompatBuf:
     """Compatibility wrapper so OLA works with both .tostring() and .tobytes()."""
@@ -106,17 +138,17 @@ class _CompatBuf:
     def __bytes__(self):
         return self._b
 
+# queued DMX state
+_dmx_dirty = False
+_pending_vals = [0]*DMX_CHANS
+
 def send_dmx(vals):
-    """Send up to 4 channel DMX, rate-limited."""
-    global _last_dmx_send, dmx_frame
-    now = time.time()
-    if (now - _last_dmx_send) < _DMX_MIN_INTERVAL:
-        return
+    """Queue up to 4 channel DMX; actual SendDmx happens in wrapper thread."""
+    global _dmx_dirty, _pending_vals
     for i in range(DMX_CHANS):
         v = max(0, min(255, int(vals[i])))
-        dmx_frame[i] = v
-    client.SendDmx(UNIVERSE, _CompatBuf(dmx_frame), lambda s: None)
-    _last_dmx_send = now
+        _pending_vals[i] = v
+    _dmx_dirty = True
 
 # ===================== Light envelopes =====================
 
@@ -649,6 +681,9 @@ def tui(stdscr):
         # Key handling
         ch = stdscr.getch()
         if ch in (ord('q'), ord('Q'), 27):  # 27 = ESC
+            # make the pump stop the wrapper loop
+            _set_stop(True)
+            _set_run(False)
             break
 
         last = time.time()
@@ -656,61 +691,63 @@ def tui(stdscr):
 # ===================== Main =====================
 
 def main():
+
     print(f"[OK] Using input: {DEVICE_INDEX} - {DEVICE_NAME}")
     print("[OK] Knobs CH0..CH5 with jump-on-move.")
     print(f"[OK] DMX -> Universe {UNIVERSE}, Channels 1..4")
 
     setup_gpio_inputs()
 
-    # Start background threads
-    th_sw = threading.Thread(target=switch_reader)   # no daemon
+    # Start app threads (switch + audio)
+    th_sw = threading.Thread(target=switch_reader)
     th_sw.start()
 
-    th_audio = threading.Thread(target=audio_loop)   # no daemon
+    th_audio = threading.Thread(target=audio_loop)
     th_audio.start()
 
+    # If TUI is enabled, run it in its own thread so main thread can own OLA
     use_tui = sys.stdout.isatty() and os.environ.get("ENABLE_TUI", "1") == "1"
+    th_tui = None
+    if use_tui:
+        th_tui = threading.Thread(target=lambda: curses.wrapper(tui))
+        th_tui.start()
+    else:
+        print("[INFO] No TTY detected (or ENABLE_TUI=0). Running headless.")
+
+    # Kick off the DMX pump and run the OLA loop IN THE MAIN THREAD
+    wrapper.AddEvent(0, _dmx_pump)
+
     try:
-        if use_tui:
-            curses.wrapper(tui)
-        else:
-            print("[INFO] No TTY detected (or ENABLE_TUI=0). Running headless.")
-            while True:
-                time.sleep(1.0)
+        wrapper.Run()
     except KeyboardInterrupt:
-        # Graceful Ctrl+C exit
         pass
     finally:
-        # Tell background loops to stop
-        global STOP_THREADS, RUNNING
-        STOP_THREADS = True
-        RUNNING = False
+        _set_stop(True)
+        _set_run(False)
 
-        # Wait for threads to finish
+        try: th_audio.join(timeout=2.0)
+        except Exception: pass
+        try: th_sw.join(timeout=1.0)
+        except Exception: pass
+        if th_tui is not None:
+            try: th_tui.join(timeout=1.0)
+            except Exception: pass
+
+        try: wrapper.Stop()
+        except Exception: pass
+
         try:
-            th_audio.join(timeout=2.0)
+            client.SendDmx(UNIVERSE, _CompatBuf(bytes([0]*DMX_CHANS)), lambda s: None)
+            time.sleep(0.05)
         except Exception:
             pass
-        try:
-            th_sw.join(timeout=1.0)
-        except Exception:
-            pass
 
-        # Turn DMX off safely
-        send_dmx([0,0,0,0])
-        time.sleep(0.05)
         print("\nAll channels off. Bye.")
 
-        # Now it's safe to close peripherals (no thread is using them)
-        try:
-            spi.close()
-        except Exception:
-            pass
-        try:
-            GPIO.cleanup()
-        except Exception:
-            pass
-
+        try: spi.close()
+        except Exception: pass
+        try: GPIO.cleanup()
+        except Exception: pass
 
 if __name__ == "__main__":
     main()

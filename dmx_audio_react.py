@@ -54,7 +54,7 @@ PREFERRED_INPUTS = [r"hifiberry", r"dac\+adc", r"scarlett", r"usb audio", r"code
 SW_PINS = [21, 22, 23, 24]  # pulled-up
 SW_MAP = {
     (1,1,1,1): 1,
-    (1,1,1,0): 2,
+    (1,1,0,0): 2,
     (1,0,1,0): 3,
     (0,1,1,0): 4,
 }
@@ -267,10 +267,25 @@ spi = spidev.SpiDev()
 spi.open(SPI_BUS, SPI_DEV)
 spi.max_speed_hz = 1350000
 spi.mode = 0
+spi_lock = threading.Lock()
 
 def read_mcp3008(ch: int) -> int:
-    """Read single-ended channel 0..7 (10-bit)."""
-    resp = spi.xfer2([1, (8+ch)<<4, 0])
+    """Read single-ended channel 0..7 (10-bit). Thread-safe & resilient."""
+    cmd = [1, (8+ch) << 4, 0]
+    with spi_lock:
+        try:
+            resp = spi.xfer2(cmd)
+        except OSError:
+            # Recover if SPI got closed during shutdown race: reopen once.
+            time.sleep(0.02)
+            try:
+                spi.close()
+            except Exception:
+                pass
+            spi.open(SPI_BUS, SPI_DEV)
+            spi.max_speed_hz = 1350000
+            spi.mode = 0
+            resp = spi.xfer2(cmd)
     return ((resp[1] & 3) << 8) | resp[2]
 
 def lerp(a,b,t): return a + (b-a)*t
@@ -529,7 +544,7 @@ def audio_loop():
 
     try:
         with sd.InputStream(device=DEVICE_INDEX, channels=2, samplerate=SR, blocksize=HOP, callback=cb):
-            while True:
+            while not STOP_THREADS:
                 time.sleep(0.05)
     finally:
         # LED OFF if audio thread exits
@@ -576,8 +591,11 @@ def draw_threshold_meter(stdscr, y, x, width, env_val, thr):
     safe_addstr(stdscr, y, x, "".join(bar))
 
 def tui(stdscr):
+    # Non-blocking getch with ~33 ms timeout (≈30 FPS), no manual sleep
     curses.curs_set(0)
-    stdscr.nodelay(True)
+    stdscr.nodelay(False)
+    stdscr.timeout(33)   # getch waits up to 33 ms; avoids KeyboardInterrupt during sleep
+
     last = time.time()
 
     while True:
@@ -590,7 +608,7 @@ def tui(stdscr):
         safe_addstr(stdscr, 1, 0,
             f"ENV_EMA={ENV_EMA:.2f}  AGC={'ON' if AGC_ON else 'OFF'} target={AGC_TARGET:.3f}  "
             f"Refractory={REFRACTORY_MS:.0f}ms  Weighting={'ON' if WEIGHTING_ON else 'OFF'}")
-        safe_addstr(stdscr, 2, 0, "Press RESET button (BCM25) to restore defaults • q quits")
+        safe_addstr(stdscr, 2, 0, "Press 'q' or ESC to quit • Press RESET (BCM25) to restore defaults")
 
         # params
         row = 4
@@ -626,16 +644,14 @@ def tui(stdscr):
             x = max(0, (w - len(msg)) // 2)
             stdscr.addnstr(h - 1, x, msg, max(0, w - x))
 
-        # ~30 FPS
-        now = time.time()
-        if now - last < 1/30.0:
-            time.sleep(max(0, 1/30.0 - (now-last)))
-        last = time.time()
         stdscr.refresh()
 
+        # Key handling
         ch = stdscr.getch()
-        if ch in (ord('q'), ord('Q')):
+        if ch in (ord('q'), ord('Q'), 27):  # 27 = ESC
             break
+
+        last = time.time()
 
 # ===================== Main =====================
 
@@ -647,10 +663,10 @@ def main():
     setup_gpio_inputs()
 
     # Start background threads
-    th_sw = threading.Thread(target=switch_reader, daemon=True)
+    th_sw = threading.Thread(target=switch_reader)   # no daemon
     th_sw.start()
 
-    th_audio = threading.Thread(target=audio_loop, daemon=True)
+    th_audio = threading.Thread(target=audio_loop)   # no daemon
     th_audio.start()
 
     use_tui = sys.stdout.isatty() and os.environ.get("ENABLE_TUI", "1") == "1"
@@ -659,21 +675,42 @@ def main():
             curses.wrapper(tui)
         else:
             print("[INFO] No TTY detected (or ENABLE_TUI=0). Running headless.")
-            # Keep the main thread alive; audio + switch threads are daemons already running.
             while True:
                 time.sleep(1.0)
+    except KeyboardInterrupt:
+        # Graceful Ctrl+C exit
+        pass
     finally:
-        # all off on exit
+        # Tell background loops to stop
+        global STOP_THREADS, RUNNING
         STOP_THREADS = True
+        RUNNING = False
+
+        # Wait for threads to finish
+        try:
+            th_audio.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            th_sw.join(timeout=1.0)
+        except Exception:
+            pass
+
+        # Turn DMX off safely
         send_dmx([0,0,0,0])
         time.sleep(0.05)
         print("\nAll channels off. Bye.")
 
+        # Now it's safe to close peripherals (no thread is using them)
+        try:
+            spi.close()
+        except Exception:
+            pass
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        try: spi.close()
-        except Exception: pass
-        try: GPIO.cleanup()
-        except Exception: pass
+    main()

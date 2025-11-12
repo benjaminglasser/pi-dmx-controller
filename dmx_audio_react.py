@@ -18,6 +18,15 @@ if 'ola' not in sys.modules:
         sys.path.insert(0, possible)
 from ola.ClientWrapper import ClientWrapper
 
+ # --- OLED (optional) ---
+try:
+    import board, busio
+    from PIL import Image, ImageDraw, ImageFont
+    import adafruit_ssd1305   # Waveshare 128x32 = SSD1305
+    _OLED_AVAILABLE = True
+except Exception:
+    _OLED_AVAILABLE = False
+
 # ===================== Config =====================
 
 UNIVERSE   = 0
@@ -595,6 +604,122 @@ def audio_loop():
     finally:
         # LED OFF if audio thread exits
         GPIO.output(READY_LED_PIN, GPIO.LOW)
+# ===================== OLED UI (128x32) =====================
+
+class OledUI:
+    """
+    128x32 SSD1305 via I2C. Runs in its own thread and pulls from globals:
+      PROGRAM, live_band_env, band.thresh, band.center, band.q,
+      band.attack_ms, band.decay_ms, BRIGHTNESS
+    Safe to construct even if hardware/libs are missing.
+    """
+    def __init__(self, addr=0x3D, fps=15):
+        self.enabled = False
+        self.addr = addr
+        self.period = 1.0 / max(1, fps)
+        self._font = None
+        if not _OLED_AVAILABLE:
+            return
+        try:
+            self.i2c = busio.I2C(board.SCL, board.SDA)
+            self.oled = adafruit_ssd1305.SSD1305_I2C(128, 32, self.i2c, addr=self.addr)
+            self.oled.fill(0); self.oled.show()
+            # tiny default font (8px high)
+            from PIL import ImageFont
+            try:
+                # Try a smaller, crisper bitmap font (included with PIL)
+                self._font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
+            except Exception:
+                # Fallback to default if font not found
+                self._font = ImageFont.load_default()
+            self.enabled = True
+        except Exception:
+            self.enabled = False
+
+    def clear(self):
+        if not self.enabled: return
+        try:
+            self.oled.fill(0); self.oled.show()
+        except Exception:
+            pass
+
+    def _fmt_center(self, f):
+        # Keep integers; 20–11000 Hz fits fine
+        return f"{int(f):d}"
+
+    def _draw_meter(self, draw, x, y, w, h, env_val, thr_val):
+        # scale like TUI: scale ~= 0.20
+        SCALE = 0.20
+        env_t = max(0.0, min(1.0, float(env_val) / SCALE))
+        thr_t = max(0.0, min(1.0, float(thr_val) / SCALE))
+        env_px = int(env_t * (w - 1))
+        thr_px = int(thr_t * (w - 1))
+        # background
+        draw.rectangle((x, y, x + w - 1, y + h - 1), outline=1, fill=0)
+        # env fill
+        if env_px > 0:
+            draw.rectangle((x + 1, y + 1, x + 1 + env_px, y + h - 2), outline=1, fill=1)
+        # threshold tick
+        tick_x = x + thr_px
+        draw.line((tick_x, y, tick_x, y + h - 1), fill=1)
+
+    def snapshot_params(self):
+        # Take an atomic snapshot of displayed values.
+        # (These are floats; minor race is harmless for UI.)
+        snap = {
+            "program": PROGRAM,
+            "env": float(live_band_env),
+            "thr": float(band.thresh),
+            "center": float(band.center),
+            "q": float(band.q),
+            "a": float(band.attack_ms),
+            "d": float(band.decay_ms),
+            "b": float(BRIGHTNESS),
+        }
+        return snap
+
+    def render_once(self):
+        if not self.enabled:
+            return
+        s = self.snapshot_params()
+
+        W, H = self.oled.width, self.oled.height  # 128x32
+        image = Image.new("1", (W, H))
+        draw = ImageDraw.Draw(image)
+        f = self._font
+
+        # === Line 1: Program / Center / Q ===
+        # Example: "P1 120Hz Q1.7"
+        line1 = f"P{s['program']}  {self._fmt_center(s['center'])}Hz  Q{s['q']:.1f}"
+        draw.text((0, 0), line1, font=f, fill=1)
+
+        # === Line 2: Audio meter ===
+        meter_x, meter_y, meter_w, meter_h = 0, 10, W, 8
+        self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h, s["env"], s["thr"])
+
+        # === Line 3: Compact stats (Th/A/D/B) ===
+        # Example: "Th0.115 A84 D5 B0.83"
+        line3 = f"Th{s['thr']:.3f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
+        draw.text((0, 22), line3, font=f, fill=1)
+
+        # Push image to OLED
+        try:
+            self.oled.image(image)
+            self.oled.show()
+        except Exception:
+            self.enabled = False
+
+    def loop(self):
+        # call in a thread
+        next_t = time.time()
+        while not STOP_THREADS:
+            t0 = time.time()
+            self.render_once()
+            next_t += self.period
+            sleep_for = max(0.0, next_t - t0)
+            time.sleep(sleep_for)
+        # clear on exit
+        self.clear()
 
 # ===================== TUI =====================
 
@@ -719,6 +844,16 @@ def main():
     th_audio = threading.Thread(target=audio_loop)
     th_audio.start()
 
+    # OLED UI (optional; no-op if hardware/lib missing)
+    oled_ui = OledUI(addr=0x3D, fps=15)
+    th_oled = None
+    if getattr(oled_ui, "enabled", False):
+        th_oled = threading.Thread(target=oled_ui.loop, daemon=True)
+        th_oled.start()
+        print("[OK] OLED UI: 128x32 @ 0x3D")
+    else:
+        print("[INFO] OLED UI not available (skipping).")
+
     # If TUI is enabled, run it in its own thread so main thread can own OLA
     use_tui = sys.stdout.isatty() and os.environ.get("ENABLE_TUI", "1") == "1"
     th_tui = None
@@ -745,6 +880,9 @@ def main():
         except Exception: pass
         if th_tui is not None:
             try: th_tui.join(timeout=1.0)
+            except Exception: pass
+        if th_oled is not None:
+            try: th_oled.join(timeout=1.0)
             except Exception: pass
 
         try: wrapper.Stop()

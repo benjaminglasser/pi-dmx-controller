@@ -9,7 +9,8 @@ echo "[2/7] Core packages"
 sudo apt install -y \
   git python3 python3-venv python3-pip \
   alsa-utils libportaudio2 portaudio19-dev libsndfile1 \
-  ola ola-python
+  ola ola-python \
+  python3-pil i2c-tools
 
 echo "[3/7] Enable SPI/I2C (non-interactive)"
 sudo raspi-config nonint do_spi 0
@@ -37,6 +38,7 @@ echo "[5/7] Python venv (with system packages so OLA Python is visible)"
 cd ~/pi-dmx-controller
 rm -rf .venv
 python3 -m venv .venv --system-site-packages
+# shellcheck disable=SC1091
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -59,10 +61,10 @@ if [ -f systemd/pi-dmx.service ]; then
   sudo systemctl enable pi-dmx.service || true
 fi
 
-if [ -f systemd/oled_splash.service ]; then
-  echo "  - Installing oled_splash.service"
-  sudo cp systemd/oled_splash.service /etc/systemd/system/oled_splash.service
-  sudo systemctl enable oled_splash.service || true
+if [ -f systemd/oled_boot.service ]; then
+  echo "  - Installing oled_boot.service"
+  sudo cp systemd/oled_boot.service /etc/systemd/system/oled_boot.service
+  sudo systemctl enable oled_boot.service || true
 fi
 
 sudo systemctl daemon-reload

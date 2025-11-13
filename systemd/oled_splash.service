@@ -1,0 +1,18 @@
+# /etc/systemd/system/oled_splash.service
+[Unit]
+Description=OLED Early Boot Splash
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+RequiresMountsFor=/home/pi/pi-dmx-controller
+Before=basic.target
+
+[Service]
+Type=oneshot
+User=pi
+ExecStart=/bin/sh -lc 'sleep 0.3; for i in 1 2 3 4 5 6; do /home/pi/pi-dmx-controller/.venv/bin/python /home/pi/pi-dmx-controller/utils/oled_boot.py && exit 0; sleep 0.5; done; exit 0'
+RemainAfterExit=yes
+SupplementaryGroups=i2c
+
+[Install]
+WantedBy=basic.target

@@ -40,6 +40,9 @@ DEFAULT_ATTACK_MS = 10.0
 DEFAULT_DECAY_MS  = 50.0
 DEFAULT_BRIGHT    = 1.0
 
+APP_STATE = "boot"   # "boot" | "loading" | "ready" | "error"
+APP_ERROR = ""       # non-empty when APP_STATE == "error"
+
 # Audio
 SR  = 44100
 HOP = 1024
@@ -533,16 +536,13 @@ agc  = Agc(target=AGC_TARGET, tau=0.95)
 
 def audio_loop():
     global bp, envd, live_band_env, live_threshold, input_rms
-    global last_trigger_ts, chase_idx, PROGRAM
+    global last_trigger_ts, chase_idx, PROGRAM, APP_STATE, APP_ERROR
 
     bp   = BiquadBandpass(SR, band.center, band.q)
     envd = EnvDetector(SR, attack_ms=8.0, release_ms=80.0)
 
     frame_dt_ms = (HOP / SR) * 1000.0
     was_above = False
-
-    # LED ON once stream is running
-    GPIO.output(READY_LED_PIN, GPIO.HIGH)
 
     def cb(indata, frames, time_info, status):
         nonlocal was_above
@@ -598,12 +598,19 @@ def audio_loop():
         send_dmx(ambient_vals(frame_dt_ms) if PROGRAM == 4 else update_lights(frame_dt_ms))
 
     try:
+        # When the stream opens successfully, we're READY
         with sd.InputStream(device=DEVICE_INDEX, channels=2, samplerate=SR, blocksize=HOP, callback=cb):
+            APP_STATE = "ready"
             while not STOP_THREADS:
                 time.sleep(0.05)
+    except Exception as e:
+        # Audio failed to initialize → show on OLED error screen
+        APP_STATE = "error"
+        APP_ERROR = f"Audio init failed: {e}"
     finally:
-        # LED OFF if audio thread exits
-        GPIO.output(READY_LED_PIN, GPIO.LOW)
+        # nothing to do here (no READY LED)
+        pass
+
 # ===================== OLED UI (128x32) =====================
 
 class OledUI:
@@ -624,13 +631,10 @@ class OledUI:
             self.i2c = busio.I2C(board.SCL, board.SDA)
             self.oled = adafruit_ssd1305.SSD1305_I2C(128, 32, self.i2c, addr=self.addr)
             self.oled.fill(0); self.oled.show()
-            # tiny default font (8px high)
             from PIL import ImageFont
             try:
-                # Try a smaller, crisper bitmap font (included with PIL)
                 self._font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
             except Exception:
-                # Fallback to default if font not found
                 self._font = ImageFont.load_default()
             self.enabled = True
         except Exception:
@@ -644,29 +648,31 @@ class OledUI:
             pass
 
     def _fmt_center(self, f):
-        # Keep integers; 20–11000 Hz fits fine
         return f"{int(f):d}"
 
     def _draw_meter(self, draw, x, y, w, h, env_val, thr_val):
-        # scale like TUI: scale ~= 0.20
         SCALE = 0.20
         env_t = max(0.0, min(1.0, float(env_val) / SCALE))
         thr_t = max(0.0, min(1.0, float(thr_val) / SCALE))
         env_px = int(env_t * (w - 1))
         thr_px = int(thr_t * (w - 1))
-        # background
         draw.rectangle((x, y, x + w - 1, y + h - 1), outline=1, fill=0)
-        # env fill
         if env_px > 0:
             draw.rectangle((x + 1, y + 1, x + 1 + env_px, y + h - 2), outline=1, fill=1)
-        # threshold tick
         tick_x = x + thr_px
         draw.line((tick_x, y, tick_x, y + h - 1), fill=1)
 
+
+    def _render_error(self, draw, err_msg):
+        f = self._font
+        draw.text((0, 0),  "ERROR", font=f, fill=1)
+        # very small screen — truncate to keep it readable
+        msg = (err_msg or "See logs")[:20]
+        draw.text((0, 12), msg, font=f, fill=1)
+        draw.text((0, 24), "Reboot or fix & retry", font=f, fill=1)
+
     def snapshot_params(self):
-        # Take an atomic snapshot of displayed values.
-        # (These are floats; minor race is harmless for UI.)
-        snap = {
+        return {
             "program": PROGRAM,
             "env": float(live_band_env),
             "thr": float(band.thresh),
@@ -676,33 +682,33 @@ class OledUI:
             "d": float(band.decay_ms),
             "b": float(BRIGHTNESS),
         }
-        return snap
 
     def render_once(self):
         if not self.enabled:
             return
-        s = self.snapshot_params()
 
         W, H = self.oled.width, self.oled.height  # 128x32
         image = Image.new("1", (W, H))
         draw = ImageDraw.Draw(image)
         f = self._font
 
-        # === Line 1: Program / Center / Q ===
-        # Example: "P1 120Hz Q1.7"
-        line1 = f"P{s['program']}  {self._fmt_center(s['center'])}Hz  Q{s['q']:.1f}"
-        draw.text((0, 0), line1, font=f, fill=1)
+        # Show state-specific screens
+        if APP_STATE == "loading":
+            return
+        elif APP_STATE == "error":
+            self._render_error(draw, APP_ERROR)
+        else:
+            # === Normal UI (APP_STATE: 'ready' / anything else) ===
+            s = self.snapshot_params()
+            line1 = f"P{s['program']}  {self._fmt_center(s['center'])}Hz  Q{s['q']:.1f}"
+            draw.text((0, 0), line1, font=f, fill=1)
 
-        # === Line 2: Audio meter ===
-        meter_x, meter_y, meter_w, meter_h = 0, 10, W, 8
-        self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h, s["env"], s["thr"])
+            meter_x, meter_y, meter_w, meter_h = 0, 10, W, 8
+            self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h, s["env"], s["thr"])
 
-        # === Line 3: Compact stats (Th/A/D/B) ===
-        # Example: "Th0.115 A84 D5 B0.83"
-        line3 = f"Th{s['thr']:.3f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
-        draw.text((0, 22), line3, font=f, fill=1)
+            line3 = f"Th{s['thr']:.3f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
+            draw.text((0, 22), line3, font=f, fill=1)
 
-        # Push image to OLED
         try:
             self.oled.image(image)
             self.oled.show()
@@ -710,16 +716,39 @@ class OledUI:
             self.enabled = False
 
     def loop(self):
-        # call in a thread
         next_t = time.time()
         while not STOP_THREADS:
             t0 = time.time()
             self.render_once()
             next_t += self.period
-            sleep_for = max(0.0, next_t - t0)
-            time.sleep(sleep_for)
-        # clear on exit
+            time.sleep(max(0.0, next_t - t0))
         self.clear()
+
+    def show_splash(self, image_path=None, seconds=2.0):
+        """Optional splash/logo shown during startup."""
+        if not self.enabled:
+            return
+        try:
+            W, H = self.oled.width, self.oled.height
+            image = Image.new("1", (W, H))
+            draw = ImageDraw.Draw(image)
+            if image_path:
+                try:
+                    src = Image.open(image_path).convert("1")
+                    src = src.resize((W, H))
+                    image.paste(src, (0, 0))
+                except Exception:
+                    draw.rectangle((0, 0, W-1, H-1), outline=1, fill=0)
+                    draw.text((2, 10), "Starting...", font=self._font, fill=1)
+            else:
+                draw.rectangle((0, 0, W-1, H-1), outline=1, fill=0)
+                draw.text((2, 10), "Starting...", font=self._font, fill=1)
+            self.oled.image(image); self.oled.show()
+            t_end = time.time() + max(0.0, float(seconds))
+            while time.time() < t_end and not STOP_THREADS:
+                time.sleep(0.05)
+        except Exception:
+            pass
 
 # ===================== TUI =====================
 
@@ -837,12 +866,9 @@ def main():
 
     setup_gpio_inputs()
 
-    # Start app threads (switch + audio)
-    th_sw = threading.Thread(target=switch_reader)
-    th_sw.start()
-
-    th_audio = threading.Thread(target=audio_loop)
-    th_audio.start()
+    # ---- App is starting up: show loading on OLED ----
+    global APP_STATE
+    APP_STATE = "loading"
 
     # OLED UI (optional; no-op if hardware/lib missing)
     oled_ui = OledUI(addr=0x3D, fps=15)
@@ -851,8 +877,16 @@ def main():
         th_oled = threading.Thread(target=oled_ui.loop, daemon=True)
         th_oled.start()
         print("[OK] OLED UI: 128x32 @ 0x3D")
+
     else:
         print("[INFO] OLED UI not available (skipping).")
+
+    # Start app threads (switch + audio)
+    th_sw = threading.Thread(target=switch_reader)
+    th_sw.start()
+
+    th_audio = threading.Thread(target=audio_loop)
+    th_audio.start()
 
     # If TUI is enabled, run it in its own thread so main thread can own OLA
     use_tui = sys.stdout.isatty() and os.environ.get("ENABLE_TUI", "1") == "1"
@@ -900,6 +934,6 @@ def main():
         except Exception: pass
         try: GPIO.cleanup()
         except Exception: pass
-
+        
 if __name__ == "__main__":
     main()

@@ -38,7 +38,7 @@ DEFAULT_Q         = 1.7
 DEFAULT_THRESH    = 0.032
 DEFAULT_ATTACK_MS = 10.0
 DEFAULT_DECAY_MS  = 50.0
-DEFAULT_BRIGHT    = 1.0
+DEFAULT_BRIGHT    = 0.5
 
 APP_STATE = "boot"   # "boot" | "loading" | "ready" | "error"
 APP_ERROR = ""       # non-empty when APP_STATE == "error"
@@ -435,28 +435,36 @@ def update_from_knobs():
 
 _last_reset_msg_time = 0.0
 def reset_to_defaults(channel=None):
+    """
+    Reset all parameters EXCEPT brightness.
+    Brightness stays where it is and its soft-takeover state is untouched.
+    """
     global band, BRIGHTNESS, _knob_last, _knob_jumped
+
+    # Core band params reset
     band.center    = DEFAULT_CENTER_HZ
     band.q         = DEFAULT_Q
     band.thresh    = DEFAULT_THRESH
     band.attack_ms = DEFAULT_ATTACK_MS
     band.decay_ms  = DEFAULT_DECAY_MS
-    BRIGHTNESS     = DEFAULT_BRIGHT
 
-    # Re-arm “jump-on-first-move”
-    for i in range(6):
+    # IMPORTANT: do NOT touch BRIGHTNESS here
+    # BRIGHTNESS stays whatever the slider currently set it to.
+
+    # Re-arm “jump-on-first-move” ONLY for knobs 0–4 (not brightness on CH5)
+    for i in range(5):   # 0..4
         _knob_jumped[i] = False
 
-    # Seed last positions so tiny ADC noise doesn’t cause instant jumps
+    # Re-seed last positions for knobs 0–4 so noise doesn't cause instant jumps
     try:
-        current = [read_knob_norm(i) for i in range(6)]
-        for i in range(6):
+        current = [read_knob_norm(i) for i in range(6)]  # still read all
+        for i in range(5):  # only overwrite 0..4
             _knob_last[i] = current[i]
+        # leave _knob_last[5] and _knob_jumped[5] alone → brightness untouched
     except Exception:
         pass
 
-    # Show message inside the TUI (no stdout printing)
-    ui_flash("[RESET] Restored default parameters.", 1.5)
+    ui_flash("[RESET] Restored defaults (except brightness).", 1.5)
     
 def setup_gpio_inputs():
     """Configure GPIO once (no edge detection; we poll)."""
@@ -706,7 +714,12 @@ class OledUI:
             meter_x, meter_y, meter_w, meter_h = 0, 10, W, 8
             self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h, s["env"], s["thr"])
 
-            line3 = f"Th{s['thr']:.3f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
+            # Map real threshold (0.001–0.200) to a 0–1 display value
+            thr_real = s["thr"]
+            thr_norm = (thr_real - 0.001) / (0.200 - 0.001)
+            thr_norm = max(0.0, min(1.0, thr_norm))  # clamp to [0, 1]
+
+            line3 = f"Th{thr_norm:0.2f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
             draw.text((0, 22), line3, font=f, fill=1)
 
         try:

@@ -37,7 +37,7 @@ DEFAULT_CENTER_HZ = 120.0
 DEFAULT_Q         = 1.7
 DEFAULT_THRESH    = 0.032
 DEFAULT_ATTACK_MS = 10.0
-DEFAULT_DECAY_MS  = 50.0
+DEFAULT_DECAY_MS  = 900.0
 DEFAULT_BRIGHT    = 0.5
 
 APP_STATE = "boot"   # "boot" | "loading" | "ready" | "error"
@@ -376,8 +376,8 @@ def map_center(x):
     return 20.0 * ((11000.0/20.0)**xb)
 def map_q(x):       return lerp(0.4,  6.0,   clamp(x,0,1))
 def map_thresh(x):  return lerp(0.001,0.200, clamp(x,0,1))
-def map_attack(x):  return lerp(1.0,  800.0, clamp(x,0,1))
-def map_decay(x):   return lerp(5.0,  2000.0,clamp(x,0,1))
+def map_attack(x):  return lerp(1.0,  200.0, clamp(x,0,1))
+def map_decay(x):   return lerp(5.0,  9999.0,clamp(x,0,1))
 def map_bright(x):  return lerp(0.0,  1.0,   clamp(x,0,1))
 
 def _jump_takeover(ch_idx, map_fn, alpha=0.25):

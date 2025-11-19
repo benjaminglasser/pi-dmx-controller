@@ -2,10 +2,41 @@
 # dmx_audio_react.py
 # Audio-reactive DMX with 6 knobs (MCP3008), 4-position program switch,
 # RESET button (GPIO25), and READY LED (GPIO17).
+#
+# Knob mapping:
+#   CH0 -> Center frequency (log, 20–18k)
+#   CH1 -> Q
+#   CH2 -> Threshold
+#   CH3 -> Cycle(N)  [0, 4, 8, 16, 32, 64, 128, 256 triggers between presets]
+#   CH4 -> Decay (150–9999ms)
+#   CH5 -> Brightness
+#
+# Presets:
+#   P1: ALL channels 1–4
+#   P2: Single-channel chase 1→2→3→4
+#   P3: Group chase: (1+4) ↔ (2+3) per trigger
+#   P4: Group chase: (1+2) ↔ (3+4) per trigger
+#
+# Cycle behavior:
+#   The rotary switch defines BASE_PROGRAM (1–4).
+#   The Cycle(N) knob defines how many triggers before flipping to the neighbor:
+#     base 1 -> cycles 1 ↔ 2
+#     base 2 -> cycles 2 ↔ 3
+#     base 3 -> cycles 3 ↔ 4
+#     base 4 -> cycles 4 ↔ 1
+#
+#   If C=0: no cycling, always stay on BASE_PROGRAM.
+#   If C>0: after N triggers, toggle between base and neighbor.
+#
+# OLED:
+#   Line1:  "P<active>  <center>Hz  Q<q>"
+#   Line2:  VU meter with threshold tick
+#   Line3:  "Th<0–1>  C<N>  D<ms>  B<0–1>"
 
 import os, sys, time, math, random, threading, curses, re
 from dataclasses import dataclass
 from array import array
+
 import numpy as np
 import sounddevice as sd
 import spidev
@@ -18,7 +49,7 @@ if 'ola' not in sys.modules:
         sys.path.insert(0, possible)
 from ola.ClientWrapper import ClientWrapper
 
- # --- OLED (optional) ---
+# --- OLED (optional) ---
 try:
     import board, busio
     from PIL import Image, ImageDraw, ImageFont
@@ -32,13 +63,19 @@ except Exception:
 UNIVERSE   = 0
 DMX_CHANS  = 4
 
-# Startup defaults (your preferred values)
+# Startup defaults
 DEFAULT_CENTER_HZ = 120.0
 DEFAULT_Q         = 1.7
 DEFAULT_THRESH    = 0.032
-DEFAULT_ATTACK_MS = 10.0
+DEFAULT_ATTACK_MS = 10.0      # fixed attack internally; knob is repurposed
 DEFAULT_DECAY_MS  = 900.0
 DEFAULT_BRIGHT    = 0.5
+THRESH_MIN = 0.001
+THRESH_MAX = 0.200
+
+# Center frequency sweep range for the band-pass filter
+MIN_CENTER_HZ = 20.0
+MAX_CENTER_HZ = 18000.0
 
 APP_STATE = "boot"   # "boot" | "loading" | "ready" | "error"
 APP_ERROR = ""       # non-empty when APP_STATE == "error"
@@ -56,13 +93,19 @@ WEIGHTING_ON  = False
 INPUT_GAIN    = 1.0
 BRIGHTNESS    = DEFAULT_BRIGHT
 
-PROGRAM       = 1   # 1..4
-RUNNING       = True
+# Program state
+PROGRAM      = 1   # currently ACTIVE program (for UI)
+BASE_PROGRAM = 1   # selected by rotary switch (1..4)
+
+RUNNING      = True
 STOP_THREADS = False
+
+# When > time.time(), knob readings are ignored (used after RESET / startup)
+IGNORE_KNOBS_UNTIL = 0.0
 
 PREFERRED_INPUTS = [r"hifiberry", r"dac\+adc", r"scarlett", r"usb audio", r"codec", r"line"]
 
-# Rotary switch pins (BCM) and mapping (your working truth table)
+# Rotary switch pins (BCM) and mapping
 SW_PINS = [21, 22, 23, 24]  # pulled-up
 SW_MAP = {
     (1,1,1,1): 1,
@@ -84,11 +127,6 @@ SPI_BUS, SPI_DEV = 0, 0
 DMX_RATE_HZ       = 25.0
 _DMX_MIN_INTERVAL = 1.0 / DMX_RATE_HZ
 
-# --- Jump-on-first-move state for 6 knobs (CH0..CH5)
-_knob_last   = [None]*6   # last normalized reading (0..1) per knob
-_knob_jumped = [False]*6  # has this knob taken control yet?
-MOVE_THRESH  = 0.005      # how far the knob must move (0..1) before it "jumps"
-
 # --- TUI flash message (rendered inside curses, not printed) ---
 _ui_flash_msg   = ""
 _ui_flash_until = 0.0
@@ -104,7 +142,34 @@ def _set_stop(val: bool):
 
 def _set_run(val: bool):
     global RUNNING
-    RUNNING = val    
+    RUNNING = val
+
+# ===================== Cycle logic globals =====================
+
+# Cycle steps options for Cycle(N) knob
+CYCLE_STEPS_OPTIONS = [0, 4, 8, 16, 32, 64, 128, 256]
+
+CYCLE_STEPS         = 0    # active N (0 = off) – default at boot
+CYCLE_TRIGGER_COUNT = 0   # how many triggers since last flip
+CYCLE_PHASE         = 0   # 0 = base program, 1 = neighbor
+
+def program_pair_for_base(base: int):
+    """Return (base, neighbor) pair for cycling."""
+    if base == 1:
+        return (1, 2)
+    elif base == 2:
+        return (2, 3)
+    elif base == 3:
+        return (3, 4)
+    else:
+        return (4, 1)
+
+def set_cycle_steps(steps: int):
+    """Set a new cycle N and reset counters/phase."""
+    global CYCLE_STEPS, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
+    CYCLE_STEPS         = int(steps)
+    CYCLE_TRIGGER_COUNT = 0
+    CYCLE_PHASE         = 0
 
 # ===================== OLA / DMX =====================
 
@@ -113,6 +178,28 @@ client  = wrapper.Client()
 
 dmx_frame      = array('B', [0]*DMX_CHANS)
 _last_dmx_send = 0.0
+_dmx_dirty     = False
+_pending_vals  = [0]*DMX_CHANS
+
+class _CompatBuf:
+    """Compatibility wrapper so OLA works with both .tostring() and .tobytes()."""
+    __slots__ = ("_b",)
+    def __init__(self, seq):
+        self._b = bytes(seq)
+    def tostring(self):   # old API
+        return self._b
+    def tobytes(self):    # new API
+        return self._b
+    def __bytes__(self):
+        return self._b
+
+def send_dmx(vals):
+    """Queue up to 4 channel DMX; actual SendDmx happens in wrapper thread."""
+    global _dmx_dirty, _pending_vals
+    for i in range(DMX_CHANS):
+        v = max(0, min(255, int(vals[i])))
+        _pending_vals[i] = v
+    _dmx_dirty = True
 
 def _dmx_pump():
     """Runs in the OLA wrapper thread: rate-limit & flush DMX if dirty, reschedule itself."""
@@ -128,39 +215,13 @@ def _dmx_pump():
         return  # don't reschedule
 
     if _dmx_dirty and (now - _last_dmx_send) >= _DMX_MIN_INTERVAL:
-        # copy pending into the frame and send from THIS (owner) thread
         for i in range(DMX_CHANS):
             dmx_frame[i] = _pending_vals[i]
         client.SendDmx(UNIVERSE, _CompatBuf(dmx_frame), lambda s: None)
         _last_dmx_send = now
         _dmx_dirty = False
 
-    # reschedule ~every 10–20ms
     wrapper.AddEvent(20, _dmx_pump)  # milliseconds
-
-class _CompatBuf:
-    """Compatibility wrapper so OLA works with both .tostring() and .tobytes()."""
-    __slots__ = ("_b",)
-    def __init__(self, seq):
-        self._b = bytes(seq)
-    def tostring(self):   # old API
-        return self._b
-    def tobytes(self):    # new API
-        return self._b
-    def __bytes__(self):
-        return self._b
-
-# queued DMX state
-_dmx_dirty = False
-_pending_vals = [0]*DMX_CHANS
-
-def send_dmx(vals):
-    """Queue up to 4 channel DMX; actual SendDmx happens in wrapper thread."""
-    global _dmx_dirty, _pending_vals
-    for i in range(DMX_CHANS):
-        v = max(0, min(255, int(vals[i])))
-        _pending_vals[i] = v
-    _dmx_dirty = True
 
 # ===================== Light envelopes =====================
 
@@ -213,30 +274,18 @@ def update_lights(dt_ms):
         vals.append(int(255 * s.post * BRIGHTNESS))
     return vals
 
-# Ambient mode
+# Ambient stub (unused in this version, but kept for future)
 _ambient_next_time = 0.0
 def ambient_vals(dt_ms):
+    """Unused in this version; preserved for future ambient experiments."""
     global _ambient_next_time
     now = time.time()
-
-    # --- Dynamic speed control only in ambient preset ---
-    if PROGRAM == 4:
-        # Normalize center frequency knob (20–11 000 Hz)
-        norm = (math.log10(band.center) - math.log10(20)) / (math.log10(11000) - math.log10(20))
-        # Wider range: slower lows, gentler highs
-        speed_factor = lerp(0.2, 2.0, 1 - norm)  # flipped: right = faster, left = slower
-    else:
-        speed_factor = 1.0
-
-    # Random trigger interval scaled by speed factor
-    base_min, base_max = 0.4 * speed_factor, 1.2 * speed_factor
-
+    base_min, base_max = 0.4, 1.2
     if now >= _ambient_next_time:
         _ambient_next_time = now + random.uniform(base_min, base_max)
         k = random.choices([1, 2, 3], weights=[0.65, 0.30, 0.05])[0]
         idxs = random.sample(range(DMX_CHANS), k)
         trigger_idxs(idxs, band.attack_ms, band.decay_ms)
-
     return update_lights(dt_ms)
 
 # ===================== DSP =====================
@@ -246,12 +295,13 @@ class BiquadBandpass:
         self.sr = sr
         self.center = center_hz
         self.q = q
-        self.reset(); self._design()
+        self.reset()
+        self._design()
     def reset(self):
         self.x1=self.x2=self.y1=self.y2=0.0
     def set_params(self, center_hz, q):
-        self.center = max(20.0,  min(18000.0, float(center_hz)))
-        self.q      = max(0.3,   min(12.0,    float(q)))
+        self.center = max(MIN_CENTER_HZ, min(MAX_CENTER_HZ, float(center_hz)))
+        self.q      = max(0.3,           min(12.0,          float(q)))
         self._design()
     def _design(self):
         w0 = 2.0*math.pi*self.center/self.sr
@@ -295,7 +345,9 @@ class EnvDetector:
 
 class Agc:
     def __init__(self, target=0.02, tau=0.95):
-        self.target=target; self.gain=1.0; self.tau=tau
+        self.target=target
+        self.gain  = 1.0
+        self.tau   = tau
     def update(self, env_mean):
         eps=1e-6
         desired=self.target/max(eps, env_mean)
@@ -334,7 +386,6 @@ def read_mcp3008(ch: int) -> int:
         try:
             resp = spi.xfer2(cmd)
         except OSError:
-            # Recover if SPI got closed during shutdown race: reopen once.
             time.sleep(0.02)
             try:
                 spi.close()
@@ -349,11 +400,14 @@ def read_mcp3008(ch: int) -> int:
 def lerp(a,b,t): return a + (b-a)*t
 def clamp(x,a,b): return max(a, min(b, x))
 
-# --- smooth + movement detection ---
-_knob_ema  = [None]*8
-_knob_last = [None]*8
-_knob_jumped = [False]*8   # becomes True after first motion per knob
-MOVE_EPS   = 0.02          # 2% change counts as a “move”
+# --- smooth + movement detection (soft-takeover) ---
+_knob_ema         = [None]*8
+_knob_last_soft   = [None]*8
+_knob_jumped_soft = [False]*8
+
+# Smaller threshold = knobs take over sooner (less "sticky").
+# 0.005 = 0.5% of full travel.
+MOVE_EPS          = 0.005
 
 def read_knob_norm(ch: int, alpha=0.25) -> float:
     raw = read_mcp3008(ch) / 1023.0
@@ -361,24 +415,6 @@ def read_knob_norm(ch: int, alpha=0.25) -> float:
     v = raw if prev is None else (alpha*raw + (1-alpha)*prev)
     _knob_ema[ch] = v
     return v
-
-def knob_moved(ch: int, v: float) -> bool:
-    """Detect first meaningful knob movement."""
-    last = _knob_last[ch]
-    moved = (last is not None and abs(v - last) > MOVE_EPS)
-    _knob_last[ch] = v
-    return moved
-
-# --- parameter mapping functions ---
-def map_center(x):
-    x = clamp(x, 0.0, 1.0)
-    xb = x**0.6
-    return 20.0 * ((11000.0/20.0)**xb)
-def map_q(x):       return lerp(0.4,  6.0,   clamp(x,0,1))
-def map_thresh(x):  return lerp(0.001,0.200, clamp(x,0,1))
-def map_attack(x):  return lerp(1.0,  200.0, clamp(x,0,1))
-def map_decay(x):   return lerp(5.0,  9999.0,clamp(x,0,1))
-def map_bright(x):  return lerp(0.0,  1.0,   clamp(x,0,1))
 
 def _jump_takeover(ch_idx, map_fn, alpha=0.25):
     """
@@ -388,58 +424,116 @@ def _jump_takeover(ch_idx, map_fn, alpha=0.25):
     Returns: None if not yet jumped, else the mapped value.
     """
     n = read_knob_norm(ch_idx, alpha=alpha)  # 0..1 smoothed
-    last = _knob_last[ch_idx]
+    last = _knob_last_soft[ch_idx]
 
     # First time we see it, seed and do nothing
     if last is None:
-        _knob_last[ch_idx] = n
+        _knob_last_soft[ch_idx] = n
         return None
 
     # If not yet jumped, wait for movement past threshold
-    if not _knob_jumped[ch_idx]:
-        if abs(n - last) >= MOVE_THRESH:
-            _knob_jumped[ch_idx] = True
-            _knob_last[ch_idx] = n
+    if not _knob_jumped_soft[ch_idx]:
+        if abs(n - last) >= MOVE_EPS:
+            _knob_jumped_soft[ch_idx] = True
+            _knob_last_soft[ch_idx] = n
             return map_fn(n)
         else:
-            _knob_last[ch_idx] = n
+            _knob_last_soft[ch_idx] = n
             return None
     else:
         # Already jumped: always follow knob
-        _knob_last[ch_idx] = n
+        _knob_last_soft[ch_idx] = n
         return map_fn(n)
 
+# --- parameter mapping functions ---
+
+def map_center(x):
+    """
+    Map knob (0..1) → center frequency [MIN_CENTER_HZ .. MAX_CENTER_HZ] on a
+    log scale, with extra resolution in the low range.
+    """
+    x = clamp(x, 0.0, 1.0)
+    gamma = 1.4          # >1 => more detail in lows, less in highs
+    t = x**gamma         # skew the knob toward the low end
+
+    log_min = math.log10(MIN_CENTER_HZ)
+    log_max = math.log10(MAX_CENTER_HZ)
+    log_f   = log_min + (log_max - log_min) * t
+    return 10**log_f
+
+def map_q(x):
+    return lerp(0.4, 6.0, clamp(x, 0, 1))
+
+def map_thresh(x):
+    """Map knob 0..1 → internal threshold THRESH_MIN..THRESH_MAX."""
+    return lerp(THRESH_MIN, THRESH_MAX, clamp(x, 0, 1))
+
+def thresh_to_ui(t: float) -> float:
+    """Map internal threshold THRESH_MIN..THRESH_MAX → 0.0..1.0 for UI."""
+    t = clamp(t, THRESH_MIN, THRESH_MAX)
+    return (t - THRESH_MIN) / (THRESH_MAX - THRESH_MIN)
+
+def map_decay(x):
+    return lerp(150.0, 9999.0, clamp(x, 0, 1))
+
+def map_bright(x):
+    return lerp(0.0, 1.0, clamp(x, 0, 1))
+
+def map_cycle_steps(x):
+    """Map knob 0..1 to one of CYCLE_STEPS_OPTIONS."""
+    x = clamp(x, 0.0, 1.0)
+    idx = int(round(x * (len(CYCLE_STEPS_OPTIONS) - 1)))
+    return CYCLE_STEPS_OPTIONS[idx]
+
 def update_from_knobs():
-    """Jump-on-first-move for all six knobs (CH0..CH5)."""
-    global BRIGHTNESS
+    """Soft-takeover for CH0,1,2,3,4; CH5 (brightness) is also soft but never reset."""
+    global BRIGHTNESS, IGNORE_KNOBS_UNTIL, CYCLE_STEPS
 
-    v = _jump_takeover(0, map_center)   # center Hz
-    if v is not None: band.center = v
+    # During a short window after RESET/boot, ignore knobs so defaults can "stick"
+    if time.time() < IGNORE_KNOBS_UNTIL:
+        return
 
-    v = _jump_takeover(1, map_q)        # Q
-    if v is not None: band.q = v
+    # CH0: Center frequency
+    v = _jump_takeover(0, map_center, alpha=0.35)
+    if v is not None:
+        band.center = v
 
-    v = _jump_takeover(2, map_thresh, alpha=0.20)  # threshold (a bit more smoothing)
-    if v is not None: band.thresh = v
+    # CH1: Q
+    v = _jump_takeover(1, map_q, alpha=0.35)
+    if v is not None:
+        band.q = v
 
-    v = _jump_takeover(3, map_attack)   # attack ms
-    if v is not None: band.attack_ms = v
+    # CH2: Threshold
+    v = _jump_takeover(2, map_thresh, alpha=0.30)
+    if v is not None:
+        band.thresh = v
 
-    v = _jump_takeover(4, map_decay)    # decay ms
-    if v is not None: band.decay_ms = v
+    # CH3: Cycle (N) — soft-takeover, but ONLY reset counters when N actually changes
+    v = _jump_takeover(3, map_cycle_steps, alpha=0.30)
+    if v is not None:
+        # Only re-apply if the quantized N changed (0, 4, 8, 16, 32, 64, 128, 256)
+        if int(v) != CYCLE_STEPS:
+            set_cycle_steps(v)
 
-    v = _jump_takeover(5, map_bright)   # brightness
-    if v is not None: BRIGHTNESS = v
+    # CH4: Decay
+    v = _jump_takeover(4, map_decay, alpha=0.35)
+    if v is not None:
+        band.decay_ms = v
+
+    # CH5: Brightness
+    v = _jump_takeover(5, map_bright, alpha=0.35)
+    if v is not None:
+        BRIGHTNESS = v
 
 # ===================== Reset Button & Ready LED =====================
 
-_last_reset_msg_time = 0.0
 def reset_to_defaults(channel=None):
     """
     Reset all parameters EXCEPT brightness.
     Brightness stays where it is and its soft-takeover state is untouched.
+    Also resets Cycle(N) back to 0.
     """
-    global band, BRIGHTNESS, _knob_last, _knob_jumped
+    global band, IGNORE_KNOBS_UNTIL
 
     # Core band params reset
     band.center    = DEFAULT_CENTER_HZ
@@ -448,24 +542,21 @@ def reset_to_defaults(channel=None):
     band.attack_ms = DEFAULT_ATTACK_MS
     band.decay_ms  = DEFAULT_DECAY_MS
 
-    # IMPORTANT: do NOT touch BRIGHTNESS here
-    # BRIGHTNESS stays whatever the slider currently set it to.
+    # Cycle: turn OFF and reset its counters/state
+    set_cycle_steps(0)   # C0 on OLED, clears count and phase
 
-    # Re-arm “jump-on-first-move” ONLY for knobs 0–4 (not brightness on CH5)
-    for i in range(5):   # 0..4
-        _knob_jumped[i] = False
+    # Clear soft-takeover state for knobs 0–4 so they re-seed cleanly
+    # (Brightness knob stays "in control" where it is.)
+    for i in range(5):   # CH0..CH4
+        _knob_ema[i]         = None
+        _knob_last_soft[i]   = None
+        _knob_jumped_soft[i] = False
 
-    # Re-seed last positions for knobs 0–4 so noise doesn't cause instant jumps
-    try:
-        current = [read_knob_norm(i) for i in range(6)]  # still read all
-        for i in range(5):  # only overwrite 0..4
-            _knob_last[i] = current[i]
-        # leave _knob_last[5] and _knob_jumped[5] alone → brightness untouched
-    except Exception:
-        pass
+    # Short window where we ignore knob updates so defaults can stick
+    IGNORE_KNOBS_UNTIL = time.time() + 0.3  # ~300 ms
 
-    ui_flash("[RESET] Restored defaults (except brightness).", 1.5)
-    
+    ui_flash("[RESET] Defaults (C0; brightness kept).", 1.5)
+
 def setup_gpio_inputs():
     """Configure GPIO once (no edge detection; we poll)."""
     GPIO.setwarnings(False)
@@ -481,53 +572,49 @@ def setup_gpio_inputs():
 def switch_reader():
     """
     Background thread:
-      - Poll rotary switch (debounce + map to PROGRAM)
-      - Poll reset button (BCM25) and call reset_to_defaults() on 1->0 press
+      - Poll rotary switch (debounce + map to BASE_PROGRAM)
+      - Poll reset button (BCM25) and call reset_to_defaults() on clean press
     """
-    global PROGRAM, STOP_THREADS
+    global BASE_PROGRAM, STOP_THREADS, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
 
     last_switch = None
     switch_stable = 0
-
-    prev_reset = 1          # pulled-up, so idle=1
-    reset_stable = 0
-    RESET_DEBOUNCE = 4      # ~4 * 10ms = ~40ms
-    SWITCH_DEBOUNCE = SW_DEBOUNCE_SAMPLES
+    last_reset_state = 1  # pulled-up: 1 = released, 0 = pressed
 
     try:
         while not STOP_THREADS:
-            # --- Safe GPIO reads (handle cleanup race on exit) ---
             try:
                 s = tuple(GPIO.input(p) for p in SW_PINS)
                 r = GPIO.input(RESET_PIN)
             except RuntimeError:
-                # mode may have been cleaned up during shutdown
                 break
 
-            # --- Rotary switch ---
+            # Rotary switch debounce
             if s == last_switch:
                 switch_stable += 1
             else:
                 last_switch, switch_stable = s, 1
-            if switch_stable >= SWITCH_DEBOUNCE:
+
+            if switch_stable >= SW_DEBOUNCE_SAMPLES:
                 prog = SW_MAP.get(s)
-                if prog and prog != PROGRAM:
-                    PROGRAM = prog
+                if prog and prog != BASE_PROGRAM:
+                    BASE_PROGRAM = prog
+                    # When base program changes, restart cycle from base side
+                    CYCLE_TRIGGER_COUNT = 0
+                    CYCLE_PHASE = 0
 
-            # --- Reset button (active LOW) ---
-            if r == prev_reset:
-                reset_stable += 1
-            else:
-                prev_reset, reset_stable = r, 1
+            # Reset button: detect clean 1 -> 0 edge with tiny debounce
+            if last_reset_state == 1 and r == 0:
+                time.sleep(0.02)
+                try:
+                    if GPIO.input(RESET_PIN) == 0:
+                        reset_to_defaults()
+                except RuntimeError:
+                    break
+            last_reset_state = r
 
-            # Detect a stable press (1 -> 0)
-            if prev_reset == 0 and reset_stable == RESET_DEBOUNCE:
-                reset_to_defaults()
-                time.sleep(0.25)  # hold-off to avoid repeats while held
-
-            time.sleep(SW_SAMPLE_PERIOD_S)  # ~10ms
+            time.sleep(SW_SAMPLE_PERIOD_S)
     finally:
-        # Don't cleanup here; other parts of the script still use GPIO
         pass
 
 # ===================== Audio loop =====================
@@ -537,6 +624,7 @@ live_threshold  = band.thresh
 input_rms       = 0.0
 last_trigger_ts = 0.0
 chase_idx       = 0
+group34_phase   = 0   # toggles between 0/1 for grouped programs (3 & 4)
 
 bp   = None
 envd = None
@@ -544,17 +632,23 @@ agc  = Agc(target=AGC_TARGET, tau=0.95)
 
 def audio_loop():
     global bp, envd, live_band_env, live_threshold, input_rms
-    global last_trigger_ts, chase_idx, PROGRAM, APP_STATE, APP_ERROR
+    global last_trigger_ts, chase_idx, group34_phase
+    global PROGRAM, BASE_PROGRAM, CYCLE_STEPS, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
+    global APP_STATE, APP_ERROR
 
     bp   = BiquadBandpass(SR, band.center, band.q)
     envd = EnvDetector(SR, attack_ms=8.0, release_ms=80.0)
+
+    band.attack_ms = DEFAULT_ATTACK_MS
 
     frame_dt_ms = (HOP / SR) * 1000.0
     was_above = False
 
     def cb(indata, frames, time_info, status):
         nonlocal was_above
-        global live_band_env, live_threshold, input_rms, last_trigger_ts, chase_idx, PROGRAM
+        global live_band_env, live_threshold, input_rms
+        global last_trigger_ts, chase_idx, group34_phase
+        global PROGRAM, BASE_PROGRAM, CYCLE_STEPS, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
 
         if not RUNNING:
             return
@@ -588,35 +682,67 @@ def audio_loop():
         above    = (live_band_env >= band.thresh)
         can_fire = ((now - last_trigger_ts)*1000.0 >= REFRACTORY_MS)
 
-        if above and not was_above and can_fire and PROGRAM in (1,2,3):
+        # Decide which program to use for THIS trigger
+        if CYCLE_STEPS > 0:
+            p_base, p_neighbor = program_pair_for_base(BASE_PROGRAM)
+            active_prog = p_base if CYCLE_PHASE == 0 else p_neighbor
+        else:
+            active_prog = BASE_PROGRAM
+
+        PROGRAM = active_prog
+
+        if above and not was_above and can_fire and active_prog in (1, 2, 3, 4):
             last_trigger_ts = now
 
-            if PROGRAM == 1:  # ALL
-                trigger_idxs([0,1,2,3], band.attack_ms, band.decay_ms)
+            # Per-program light behavior
+            if active_prog == 1:  # ALL
+                trigger_idxs([0, 1, 2, 3], band.attack_ms, band.decay_ms)
 
-            elif PROGRAM == 2:  # CHASE
+            elif active_prog == 2:  # CHASE (single channel)
                 trigger_idxs([chase_idx], band.attack_ms, band.decay_ms)
                 chase_idx = (chase_idx + 1) % 4
 
-            elif PROGRAM == 3:  # RANDOM JUMP
-                rand_idx = random.randint(0, 3)
-                trigger_idxs([rand_idx], band.attack_ms, band.decay_ms)
+            elif active_prog == 3:  # GROUP CHASE: (1+4) ↔ (2+3)
+                if group34_phase == 0:
+                    trigger_idxs([0, 3], band.attack_ms, band.decay_ms)
+                    group34_phase = 1
+                else:
+                    trigger_idxs([1, 2], band.attack_ms, band.decay_ms)
+                    group34_phase = 0
+
+            elif active_prog == 4:  # GROUP CHASE: (1+2) ↔ (3+4)
+                if group34_phase == 0:
+                    trigger_idxs([0, 1], band.attack_ms, band.decay_ms)
+                    group34_phase = 1
+                else:
+                    trigger_idxs([2, 3], band.attack_ms, band.decay_ms)
+                    group34_phase = 0
+
+            # Cycle trigger counting
+            if CYCLE_STEPS > 0:
+                CYCLE_TRIGGER_COUNT += 1
+                if CYCLE_TRIGGER_COUNT >= CYCLE_STEPS:
+                    CYCLE_TRIGGER_COUNT = 0
+                    CYCLE_PHASE = 1 - CYCLE_PHASE
 
         # DMX output
-        send_dmx(ambient_vals(frame_dt_ms) if PROGRAM == 4 else update_lights(frame_dt_ms))
+        send_dmx(update_lights(frame_dt_ms))
+
+        was_above = above
 
     try:
-        # When the stream opens successfully, we're READY
-        with sd.InputStream(device=DEVICE_INDEX, channels=2, samplerate=SR, blocksize=HOP, callback=cb):
+        with sd.InputStream(device=DEVICE_INDEX,
+                            channels=2,
+                            samplerate=SR,
+                            blocksize=HOP,
+                            callback=cb):
             APP_STATE = "ready"
             while not STOP_THREADS:
                 time.sleep(0.05)
     except Exception as e:
-        # Audio failed to initialize → show on OLED error screen
         APP_STATE = "error"
         APP_ERROR = f"Audio init failed: {e}"
     finally:
-        # nothing to do here (no READY LED)
         pass
 
 # ===================== OLED UI (128x32) =====================
@@ -624,9 +750,8 @@ def audio_loop():
 class OledUI:
     """
     128x32 SSD1305 via I2C. Runs in its own thread and pulls from globals:
-      PROGRAM, live_band_env, band.thresh, band.center, band.q,
-      band.attack_ms, band.decay_ms, BRIGHTNESS
-    Safe to construct even if hardware/libs are missing.
+      PROGRAM, BASE_PROGRAM, live_band_env, band.thresh, band.center, band.q,
+      band.decay_ms, BRIGHTNESS, CYCLE_STEPS
     """
     def __init__(self, addr=0x3D, fps=15):
         self.enabled = False
@@ -641,7 +766,9 @@ class OledUI:
             self.oled.fill(0); self.oled.show()
             from PIL import ImageFont
             try:
-                self._font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
+                self._font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8
+                )
             except Exception:
                 self._font = ImageFont.load_default()
             self.enabled = True
@@ -666,29 +793,29 @@ class OledUI:
         thr_px = int(thr_t * (w - 1))
         draw.rectangle((x, y, x + w - 1, y + h - 1), outline=1, fill=0)
         if env_px > 0:
-            draw.rectangle((x + 1, y + 1, x + 1 + env_px, y + h - 2), outline=1, fill=1)
+            draw.rectangle((x + 1, y + 1, x + 1 + env_px, y + h - 2),
+                           outline=1, fill=1)
         tick_x = x + thr_px
         draw.line((tick_x, y, tick_x, y + h - 1), fill=1)
-
 
     def _render_error(self, draw, err_msg):
         f = self._font
         draw.text((0, 0),  "ERROR", font=f, fill=1)
-        # very small screen — truncate to keep it readable
         msg = (err_msg or "See logs")[:20]
         draw.text((0, 12), msg, font=f, fill=1)
         draw.text((0, 24), "Reboot or fix & retry", font=f, fill=1)
 
     def snapshot_params(self):
         return {
-            "program": PROGRAM,
+            "base_program": BASE_PROGRAM,
+            "active_program": PROGRAM,
             "env": float(live_band_env),
             "thr": float(band.thresh),
             "center": float(band.center),
             "q": float(band.q),
-            "a": float(band.attack_ms),
             "d": float(band.decay_ms),
             "b": float(BRIGHTNESS),
+            "c": int(CYCLE_STEPS),
         }
 
     def render_once(self):
@@ -700,26 +827,23 @@ class OledUI:
         draw = ImageDraw.Draw(image)
         f = self._font
 
-        # Show state-specific screens
         if APP_STATE == "loading":
             return
         elif APP_STATE == "error":
             self._render_error(draw, APP_ERROR)
         else:
-            # === Normal UI (APP_STATE: 'ready' / anything else) ===
             s = self.snapshot_params()
-            line1 = f"P{s['program']}  {self._fmt_center(s['center'])}Hz  Q{s['q']:.1f}"
+            line1 = f"P{s['active_program']}  {self._fmt_center(s['center'])}Hz  Q{s['q']:.1f}"
             draw.text((0, 0), line1, font=f, fill=1)
 
             meter_x, meter_y, meter_w, meter_h = 0, 10, W, 8
-            self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h, s["env"], s["thr"])
+            self._draw_meter(draw, meter_x, meter_y, meter_w, meter_h,
+                             s["env"], s["thr"])
 
-            # Map real threshold (0.001–0.200) to a 0–1 display value
-            thr_real = s["thr"]
-            thr_norm = (thr_real - 0.001) / (0.200 - 0.001)
-            thr_norm = max(0.0, min(1.0, thr_norm))  # clamp to [0, 1]
+            # Threshold normalized for display (0.0–1.0)
+            thr_norm = thresh_to_ui(s["thr"])
 
-            line3 = f"Th{thr_norm:0.2f}  A{int(s['a']):d}  D{int(s['d']):d}  B{s['b']:.2f}"
+            line3 = f"Th{thr_norm:0.1f}  C{s['c']}  D{int(s['d']):d}  B{s['b']:.2f}"
             draw.text((0, 22), line3, font=f, fill=1)
 
         try:
@@ -738,7 +862,6 @@ class OledUI:
         self.clear()
 
     def show_splash(self, image_path=None, seconds=2.0):
-        """Optional splash/logo shown during startup."""
         if not self.enabled:
             return
         try:
@@ -775,7 +898,7 @@ def safe_addstr(stdscr, y, x, s):
         stdscr.addnstr(y, x, s, maxlen)
 
 def draw_band_bar(stdscr, y, x, width, center, q):
-    left_hz, right_hz = 20.0, 11000.0
+    left_hz, right_hz = MIN_CENTER_HZ, MAX_CENTER_HZ
     def hz_to_col(f):
         lf = math.log10(max(left_hz, min(right_hz, f)))
         lmin, lmax = math.log10(left_hz), math.log10(right_hz)
@@ -804,32 +927,35 @@ def draw_threshold_meter(stdscr, y, x, width, env_val, thr):
     safe_addstr(stdscr, y, x, "".join(bar))
 
 def tui(stdscr):
-    # Non-blocking getch with ~33 ms timeout (≈30 FPS), no manual sleep
     curses.curs_set(0)
     stdscr.nodelay(False)
-    stdscr.timeout(33)   # getch waits up to 33 ms; avoids KeyboardInterrupt during sleep
-
-    last = time.time()
+    stdscr.timeout(33)   # ~30 FPS
 
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         bar_width = max(20, min(65, w - 2))
 
-        safe_addstr(stdscr, 0, 0,
-            f"Program {PROGRAM}   RUN={'ON' if RUNNING else 'PAUSE'}   Device={DEVICE_NAME}  SR={SR}  HOP={HOP}")
-        safe_addstr(stdscr, 1, 0,
+        safe_addstr(
+            stdscr, 0, 0,
+            f"Base P{BASE_PROGRAM}  Active P{PROGRAM}   RUN={'ON' if RUNNING else 'PAUSE'}   "
+            f"Device={DEVICE_NAME}  SR={SR}  HOP={HOP}"
+        )
+        safe_addstr(
+            stdscr, 1, 0,
             f"ENV_EMA={ENV_EMA:.2f}  AGC={'ON' if AGC_ON else 'OFF'} target={AGC_TARGET:.3f}  "
-            f"Refractory={REFRACTORY_MS:.0f}ms  Weighting={'ON' if WEIGHTING_ON else 'OFF'}")
-        safe_addstr(stdscr, 2, 0, "Press 'q' or ESC to quit • Press RESET (BCM25) to restore defaults")
+            f"Refractory={REFRACTORY_MS:.0f}ms  Weighting={'ON' if WEIGHTING_ON else 'OFF'}"
+        )
+        safe_addstr(
+            stdscr, 2, 0,
+            f"Cycle: C={CYCLE_STEPS}  phase={CYCLE_PHASE}  count={CYCLE_TRIGGER_COUNT}"
+        )
 
-        # params
         row = 4
         labels_vals = [
             ("center (Hz)",  band.center),
             ("Q",            band.q),
-            ("threshold",    band.thresh),
-            ("attack (ms)",  band.attack_ms),
+            ("threshold",    thresh_to_ui(band.thresh)),  # 0.0–1.0 for UI
             ("decay (ms)",   band.decay_ms),
             ("brightness",   BRIGHTNESS),
         ]
@@ -840,15 +966,20 @@ def tui(stdscr):
 
         safe_addstr(stdscr, row+1, 0, "Band Env vs Threshold (| is threshold):")
         draw_threshold_meter(stdscr, row+2, 0, bar_width, live_band_env, band.thresh)
-        safe_addstr(stdscr, row+3, 0, f"env={live_band_env:.4f}  thresh={band.thresh:.4f} (scale ~0.20)")
+        safe_addstr(
+            stdscr, row+3, 0,
+            f"env={live_band_env:.4f}  thresh={thresh_to_ui(band.thresh):.1f} (0–1 UI)"
+        )
 
         safe_addstr(stdscr, row+5, 0, "Targeted Frequency Band:")
         draw_band_bar(stdscr, row+6, 0, bar_width, band.center, band.q)
 
         safe_addstr(stdscr, row+8, 0, "Channels:")
         for i, s in enumerate(states, start=1):
-            safe_addstr(stdscr, row+8+i, 1,
-                        f"ch{i}: env={s.env:.3f} post={s.post:.3f} stage={'on' if s.active else 'idle'}")
+            safe_addstr(
+                stdscr, row+8+i, 1,
+                f"ch{i}: env={s.env:.3f} post={s.post:.3f} stage={'on' if s.active else 'idle'}"
+            )
 
         # transient UI flash at bottom line
         if time.time() < _ui_flash_until and _ui_flash_msg:
@@ -859,49 +990,44 @@ def tui(stdscr):
 
         stdscr.refresh()
 
-        # Key handling
         ch = stdscr.getch()
-        if ch in (ord('q'), ord('Q'), 27):  # 27 = ESC
-            # make the pump stop the wrapper loop
+        if ch in (ord('q'), ord('Q'), 27):  # ESC
             _set_stop(True)
             _set_run(False)
             break
-
-        last = time.time()
 
 # ===================== Main =====================
 
 def main():
 
     print(f"[OK] Using input: {DEVICE_INDEX} - {DEVICE_NAME}")
-    print("[OK] Knobs CH0..CH5 with jump-on-move.")
+    print("[OK] Knobs CH0..CH5 with soft-takeover.")
     print(f"[OK] DMX -> Universe {UNIVERSE}, Channels 1..4")
 
     setup_gpio_inputs()
 
-    # ---- App is starting up: show loading on OLED ----
-    global APP_STATE
+    # Initial ignore window so startup noise doesn't cause jumps
+    global APP_STATE, IGNORE_KNOBS_UNTIL
     APP_STATE = "loading"
+    IGNORE_KNOBS_UNTIL = time.time() + 0.3
 
-    # OLED UI (optional; no-op if hardware/lib missing)
+    # OLED UI (optional)
     oled_ui = OledUI(addr=0x3D, fps=15)
     th_oled = None
     if getattr(oled_ui, "enabled", False):
         th_oled = threading.Thread(target=oled_ui.loop, daemon=True)
         th_oled.start()
         print("[OK] OLED UI: 128x32 @ 0x3D")
-
     else:
         print("[INFO] OLED UI not available (skipping).")
 
-    # Start app threads (switch + audio)
+    # Threads
     th_sw = threading.Thread(target=switch_reader)
     th_sw.start()
 
     th_audio = threading.Thread(target=audio_loop)
     th_audio.start()
 
-    # If TUI is enabled, run it in its own thread so main thread can own OLA
     use_tui = sys.stdout.isatty() and os.environ.get("ENABLE_TUI", "1") == "1"
     th_tui = None
     if use_tui:
@@ -910,7 +1036,6 @@ def main():
     else:
         print("[INFO] No TTY detected (or ENABLE_TUI=0). Running headless.")
 
-    # Kick off the DMX pump and run the OLA loop IN THE MAIN THREAD
     wrapper.AddEvent(0, _dmx_pump)
 
     try:
@@ -935,6 +1060,7 @@ def main():
         try: wrapper.Stop()
         except Exception: pass
 
+        # All channels off
         try:
             client.SendDmx(UNIVERSE, _CompatBuf(bytes([0]*DMX_CHANS)), lambda s: None)
             time.sleep(0.05)
@@ -947,6 +1073,6 @@ def main():
         except Exception: pass
         try: GPIO.cleanup()
         except Exception: pass
-        
+
 if __name__ == "__main__":
     main()

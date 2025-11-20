@@ -227,6 +227,7 @@ source .venv/bin/activate
 ```bash
 python dmx_audio_react.py
 ```
+Press q to exit TUI.
 
 ### 4. Restart autostart service
 ```bash
@@ -238,6 +239,15 @@ sudo systemctl start pi-dmx
 sudo systemctl disable pi-dmx
 ```
 
+### 6. Re-enable autostart when you’re done
+```bash
+sudo systemctl enable pi-dmx
+```
+
+### 7. Ensure OLED splash also autostarts (optional)
+```bash
+sudo systemctl enable oled_splash.service
+```
 ---
 
 ## 8. New SD Card / Recovery Checklist

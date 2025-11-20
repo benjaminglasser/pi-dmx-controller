@@ -20,14 +20,18 @@ This README includes:
 ---
 
 ## FEATURES
-- Six knobs:  
-  - Center Frequency  
-  - Q  
-  - Threshold  
-  - Attack  
-  - Decay  
-  - Brightness  
-- Four program modes (rotary switch): All, Chase, Random, Ambient  
+Six knobs:
+  - Center Frequency (20–18k Hz, log scale)
+  - Q (0.4–6.0)
+  - Threshold (0.001–0.200)
+  - Cycle (N) — 0,4,8,16,32,64,128,256 triggers
+  - Decay (150–9999 ms)
+  - Brightness (0.0–1.0)
+- Four program modes (rotary switch):
+  - Program 1: All channels
+  - Program 2: Single-channel Chase (1→2→3→4)
+  - Program 3: Group Chase A (1+4 ↔ 2+3)
+  - Program 4: Group Chase B (1+2 ↔ 3+4)
 - Reset button restores defaults  
 - Ready LED (GPIO17)  
 - OLED 128×32 UI  
@@ -94,7 +98,7 @@ BCM17 → 330Ω → LED → GND
 Center: 120 Hz  
 Q: 1.7  
 Threshold: 0.032  
-Attack: 10 ms  
+Cycles(N): 0 
 Decay: 50 ms  
 Brightness: 1.0  
 ```
@@ -206,17 +210,32 @@ ola_streaming_client --universe 0 --dmx 0,0,0,0
 ---
 
 ## 7. TUI Mode
+### aka How to Stop the Service, Edit Code, and Run Manually
+
+### 1. Stop the running service
 ```bash
 sudo systemctl stop pi-dmx
+```
+
+### 2. Activate your virtualenv
+ ```bash
 cd ~/pi-dmx-controller
 source .venv/bin/activate
+ ```
+
+### 3. Run the app manually
+```bash
 python dmx_audio_react.py
 ```
 
-Quit: **q**  
-Return to service:
+### 4. Restart autostart service
 ```bash
 sudo systemctl start pi-dmx
+```
+
+### 5. Disable autostart if needed
+```bash
+sudo systemctl disable pi-dmx
 ```
 
 ---
